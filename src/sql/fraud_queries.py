@@ -2,18 +2,23 @@ INSERT_FRAUD_RESULT = """
 INSERT INTO fraud_results (
     transaction_id,
     risk_score,
+    risk_level,
     is_fraud,
-    triggered_rules
+    reasons,
+    evaluated_at
 )
 VALUES (
     :transaction_id,
     :risk_score,
+    :risk_level,
     :is_fraud,
-    :triggered_rules
+    :reasons,
+    :evaluated_at
 );
 """
 
-COUNT_FRAUD_RESULTS = """
+
+COUNT_RESULTS = """
 SELECT COUNT(*)
 FROM fraud_results;
 """

@@ -1,0 +1,51 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: Fraud Detection Pipeline
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 900
+    MemorySize: 512
+
+Resources:
+
+  FraudDetectionFunction:
+
+    Type: AWS::Serverless::Function
+
+    Properties:
+
+      CodeUri: ..
+
+      Handler: src/lambda_function/handler.lambda_handler
+
+      Runtime: python3.11
+
+      Architectures:
+        - x86_64
+
+      Environment:
+
+        Variables:
+
+          BATCH_SIZE: "100"
+
+          DB_HOST: ""
+
+          DB_PORT: ""
+
+          DB_NAME: ""
+
+          DB_USER: ""
+
+          DB_PASSWORD: ""
+
+Outputs:
+
+  FraudDetectionFunction:
+
+    Description: Lambda ARN
+
+    Value: !GetAtt FraudDetectionFunction.Arn

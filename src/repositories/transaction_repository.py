@@ -11,9 +11,11 @@ from src.sql.transaction_queries import (
 class TransactionRepository:
 
     def insert_transaction(self, transaction):
+
         session = get_session()
 
         try:
+
             result = session.execute(
                 text(INSERT_TRANSACTION),
                 transaction.to_dict(),
@@ -29,9 +31,11 @@ class TransactionRepository:
             session.close()
 
     def count_transactions(self):
+
         session = get_session()
 
         try:
+
             result = session.execute(
                 text(COUNT_TRANSACTIONS)
             )
@@ -42,9 +46,11 @@ class TransactionRepository:
             session.close()
 
     def get_random_customer_id(self):
+
         session = get_session()
 
         try:
+
             result = session.execute(
                 text(GET_RANDOM_CUSTOMER)
             )

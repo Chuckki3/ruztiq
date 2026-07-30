@@ -4,57 +4,63 @@ from src.models.fraud_result import FraudResult
 
 
 class FraudEngine:
+    """
+    Rule-based fraud detection engine.
 
-    def evaluate(self, transaction, transaction_id=0):
+    Assigns a risk score based on transaction characteristics and
+    returns a FraudResult object.
+    """
 
+    FRAUD_THRESHOLD = 50
+
+    def evaluate(self, transaction, transaction_id):
         score = 0
         reasons = []
 
-        # High amount
-        if transaction.amount >= 500000:
-            score += 40
-            reasons.append("High transaction amount")
+        # High-value transaction
+        if transaction.amount > 150000:
+            score += 30
+            reasons.append("High Amount")
 
-        # Failed transaction
-        if transaction.transaction_status == "FAILED":
-            score += 20
-            reasons.append("Failed payment")
-
-        # Crypto payment
-        if transaction.payment_method == "Crypto":
+        # Late-night transaction
+        if 0 <= transaction.transaction_time.hour <= 5:
             score += 15
-            reasons.append("Crypto payment")
+            reasons.append("Late Night")
 
-        # Late night
-        hour = transaction.transaction_time.hour
-
-        if hour < 5:
-            score += 15
-            reasons.append("Late night transaction")
-
-        # High-risk merchant categories
-        risky_categories = {
-            "Crypto",
-            "Gaming",
-            "Betting",
-        }
-
-        if transaction.merchant_category in risky_categories:
+        # Large entertainment spending
+        if (
+            transaction.merchant_category == "Entertainment"
+            and transaction.amount > 5000
+        ):
             score += 10
-            reasons.append("High-risk merchant")
+            reasons.append("High Entertainment Spend")
 
+        # High-value USSD transaction
+        if (
+            transaction.payment_method == "USSD"
+            and transaction.amount > 100000
+        ):
+            score += 15
+            reasons.append("High Value USSD")
+
+        # Failed payment
+        if transaction.status == "FAILED":
+            score += 20
+            reasons.append("Failed Payment")
+
+        # Assign risk level
         if score >= 60:
-            level = "HIGH"
+            risk_level = "HIGH"
         elif score >= 30:
-            level = "MEDIUM"
+            risk_level = "MEDIUM"
         else:
-            level = "LOW"
+            risk_level = "LOW"
 
         return FraudResult(
             transaction_id=transaction_id,
             risk_score=score,
-            risk_level=level,
-            is_fraud=score >= 60,
-            reasons=", ".join(reasons),
+            risk_level=risk_level,
+            is_fraud=score >= self.FRAUD_THRESHOLD,
+            reasons=", ".join(reasons) if reasons else "No suspicious activity",
             evaluated_at=datetime.utcnow(),
         )

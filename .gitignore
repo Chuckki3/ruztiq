@@ -2,13 +2,18 @@
 __pycache__/
 *.py[cod]
 *.so
+*.egg-info/
 
-# Virtual Environment
+# Virtual environments
 .venv/
 venv/
 
-# Environment Variables
+# Environment files
 .env
+env.json
+
+# AWS SAM
+.aws-sam/
 
 # macOS
 .DS_Store
@@ -16,21 +21,19 @@ venv/
 # VS Code
 .vscode/
 
-# Pytest
-.pytest_cache/
+# Logs
+*.log
 
-# Coverage
+# Test artifacts
+.pytest_cache/
 .coverage
 htmlcov/
 
-# Build
-build/
-dist/
-*.egg-info/
-
-# Logs
-logs/
-*.log
+# Python cache
+.mypy_cache/
 
 # IDE
 .idea/
+
+# Local outputs
+response.json

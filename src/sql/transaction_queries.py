@@ -28,10 +28,12 @@ VALUES (
 RETURNING transaction_id;
 """
 
+
 COUNT_TRANSACTIONS = """
 SELECT COUNT(*)
 FROM transactions;
 """
+
 
 GET_RANDOM_CUSTOMER = """
 SELECT customer_id
