@@ -1,41 +1,18 @@
-from sqlalchemy import text
-
-from src.services.database import get_session
-from src.sql.fraud_queries import (
-    INSERT_FRAUD_RESULT,
-    COUNT_RESULTS,
-)
+from src.services.dynamodb import FRAUD_RESULTS_TABLE
 
 
 class FraudRepository:
 
     def insert_result(self, result):
 
-        session = get_session()
+        item = result.to_dict()
 
-        try:
-
-            session.execute(
-                text(INSERT_FRAUD_RESULT),
-                result.to_dict(),
-            )
-
-            session.commit()
-
-        finally:
-            session.close()
+        FRAUD_RESULTS_TABLE.put_item(Item=item)
 
     def count_results(self):
 
-        session = get_session()
+        response = FRAUD_RESULTS_TABLE.scan(
+            Select="COUNT"
+        )
 
-        try:
-
-            result = session.execute(
-                text(COUNT_RESULTS)
-            )
-
-            return result.scalar()
-
-        finally:
-            session.close()
+        return response["Count"]

@@ -1,66 +1,37 @@
-from sqlalchemy import text
+from decimal import Decimal
 
-from src.services.database import get_session
-from src.sql.transaction_queries import (
-    INSERT_TRANSACTION,
-    COUNT_TRANSACTIONS,
-    GET_RANDOM_CUSTOMER,
-)
+from src.services.dynamodb import TRANSACTIONS_TABLE
 
 
 class TransactionRepository:
 
     def insert_transaction(self, transaction):
 
-        session = get_session()
+        item = transaction.to_dict()
 
-        try:
+        # DynamoDB stores decimals instead of Python floats
+        item["amount"] = Decimal(str(item["amount"]))
 
-            result = session.execute(
-                text(INSERT_TRANSACTION),
-                transaction.to_dict(),
-            )
+        # Store datetime as ISO 8601 string
+        item["transaction_time"] = (
+            item["transaction_time"].isoformat()
+        )
 
-            transaction_id = result.scalar()
+        TRANSACTIONS_TABLE.put_item(Item=item)
 
-            session.commit()
-
-            return transaction_id
-
-        finally:
-            session.close()
+        return item["transaction_reference"]
 
     def count_transactions(self):
 
-        session = get_session()
+        response = TRANSACTIONS_TABLE.scan(
+            Select="COUNT"
+        )
 
-        try:
-
-            result = session.execute(
-                text(COUNT_TRANSACTIONS)
-            )
-
-            return result.scalar()
-
-        finally:
-            session.close()
+        return response["Count"]
 
     def get_random_customer_id(self):
+        """
+        Placeholder until we migrate customers to DynamoDB.
+        """
 
-        session = get_session()
-
-        try:
-
-            result = session.execute(
-                text(GET_RANDOM_CUSTOMER)
-            )
-
-            row = result.fetchone()
-
-            if row:
-                return row[0]
-
-            return None
-
-        finally:
-            session.close()
+        return 1

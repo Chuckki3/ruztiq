@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 
-Description: Fraud Detection Pipeline
+Description: SentinelIQ Fraud Detection Pipeline
 
 Globals:
   Function:
@@ -11,12 +11,42 @@ Globals:
 
 Resources:
 
-  FraudDetectionFunction:
+  TransactionsTable:
+    Type: AWS::DynamoDB::Table
 
+    Properties:
+      TableName: Transactions
+
+      BillingMode: PAY_PER_REQUEST
+
+      AttributeDefinitions:
+        - AttributeName: transaction_reference
+          AttributeType: S
+
+      KeySchema:
+        - AttributeName: transaction_reference
+          KeyType: HASH
+
+  FraudResultsTable:
+    Type: AWS::DynamoDB::Table
+
+    Properties:
+      TableName: FraudResults
+
+      BillingMode: PAY_PER_REQUEST
+
+      AttributeDefinitions:
+        - AttributeName: transaction_reference
+          AttributeType: S
+
+      KeySchema:
+        - AttributeName: transaction_reference
+          KeyType: HASH
+
+  FraudDetectionFunction:
     Type: AWS::Serverless::Function
 
     Properties:
-
       CodeUri: ..
 
       Handler: src/lambda_function/handler.lambda_handler
@@ -26,26 +56,31 @@ Resources:
       Architectures:
         - x86_64
 
+      Policies:
+        - AWSLambdaBasicExecutionRole
+
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TransactionsTable
+
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FraudResultsTable
+
       Environment:
-
         Variables:
-
           BATCH_SIZE: "100"
-
-          DB_HOST: ""
-
-          DB_PORT: ""
-
-          DB_NAME: ""
-
-          DB_USER: ""
-
-          DB_PASSWORD: ""
+          TRANSACTIONS_TABLE: !Ref TransactionsTable
+          FRAUD_RESULTS_TABLE: !Ref FraudResultsTable
 
 Outputs:
 
   FraudDetectionFunction:
-
     Description: Lambda ARN
-
     Value: !GetAtt FraudDetectionFunction.Arn
+
+  TransactionsTableName:
+    Description: Transactions DynamoDB Table
+    Value: !Ref TransactionsTable
+
+  FraudResultsTableName:
+    Description: Fraud Results DynamoDB Table
+    Value: !Ref FraudResultsTable

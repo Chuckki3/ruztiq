@@ -7,13 +7,12 @@ class FraudEngine:
     """
     Rule-based fraud detection engine.
 
-    Assigns a risk score based on transaction characteristics and
-    returns a FraudResult object.
+    Evaluates a transaction and returns a FraudResult.
     """
 
     FRAUD_THRESHOLD = 50
 
-    def evaluate(self, transaction, transaction_id):
+    def evaluate(self, transaction):
         score = 0
         reasons = []
 
@@ -48,7 +47,7 @@ class FraudEngine:
             score += 20
             reasons.append("Failed Payment")
 
-        # Assign risk level
+        # Determine risk level
         if score >= 60:
             risk_level = "HIGH"
         elif score >= 30:
@@ -57,10 +56,12 @@ class FraudEngine:
             risk_level = "LOW"
 
         return FraudResult(
-            transaction_id=transaction_id,
+            transaction_reference=transaction.transaction_reference,
             risk_score=score,
             risk_level=risk_level,
-            is_fraud=score >= self.FRAUD_THRESHOLD,
-            reasons=", ".join(reasons) if reasons else "No suspicious activity",
+            is_fraud=(score >= self.FRAUD_THRESHOLD),
+            reasons=", ".join(reasons)
+            if reasons
+            else "No suspicious activity",
             evaluated_at=datetime.utcnow(),
         )

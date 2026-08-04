@@ -10,14 +10,7 @@ logger = logging.getLogger(__name__)
 
 class PipelineService:
     """
-    Coordinates the end-to-end fraud detection pipeline.
-
-    Workflow:
-        1. Select a random customer
-        2. Generate a transaction
-        3. Store the transaction
-        4. Evaluate fraud risk
-        5. Store the fraud result
+    Coordinates the SentinelIQ fraud detection pipeline.
     """
 
     def __init__(self):
@@ -26,33 +19,28 @@ class PipelineService:
         self.fraud_engine = FraudEngine()
 
     def process_transaction(self):
-        """
-        Process a single transaction through the pipeline.
-        """
 
-        customer_id = self.transaction_repository.get_random_customer_id()
-
-        if customer_id is None:
-            logger.warning("No customers found in the database.")
-            return None
+        customer_id = (
+            self.transaction_repository.get_random_customer_id()
+        )
 
         transaction = generate_transaction(customer_id)
 
-        transaction_id = self.transaction_repository.insert_transaction(
+        self.transaction_repository.insert_transaction(
             transaction
         )
 
         fraud_result = self.fraud_engine.evaluate(
-            transaction=transaction,
-            transaction_id=transaction_id,
+            transaction
         )
 
-        self.fraud_repository.insert_result(fraud_result)
+        self.fraud_repository.insert_result(
+            fraud_result
+        )
 
         logger.info(
-            "Processed transaction %s | Customer=%s | Risk=%s (%s)",
+            "Processed %s | Risk=%s (%s)",
             transaction.transaction_reference,
-            customer_id,
             fraud_result.risk_score,
             fraud_result.risk_level,
         )
@@ -63,35 +51,23 @@ class PipelineService:
         }
 
     def process_batch(self, batch_size=100):
-        """
-        Process multiple transactions.
-
-        Args:
-            batch_size (int): Number of transactions to process.
-
-        Returns:
-            int: Number of successfully processed transactions.
-        """
 
         logger.info(
-            "Starting batch processing (%s transactions)...",
+            "Processing %s transactions...",
             batch_size,
         )
 
         processed = 0
 
         for _ in range(batch_size):
+
             result = self.process_transaction()
 
-            if result is not None:
+            if result:
                 processed += 1
 
         logger.info(
-            "Batch completed successfully."
-        )
-
-        logger.info(
-            "Transactions processed: %s",
+            "Processed %s transactions.",
             processed,
         )
 
