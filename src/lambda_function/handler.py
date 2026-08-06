@@ -1,49 +1,33 @@
 import logging
-import os
 
 from src.logging_config import setup_logging
-from src.services.pipeline_service import PipelineService
+from src.services.metrics_service import MetricsService
+from src.services.request_router import RequestRouter
 
 setup_logging()
 
 logger = logging.getLogger(__name__)
+
+router = RequestRouter()
 
 
 def lambda_handler(event, context):
     """
     AWS Lambda entry point.
 
-    Priority:
-    1. event["batch_size"]
-    2. Lambda Environment Variable BATCH_SIZE
-    3. Default = 100
+    Delegates request handling to the RequestRouter.
     """
 
-    event = event or {}
+    logger.info("Received Lambda invocation.")
 
-    batch_size = int(
-        event.get(
-            "batch_size",
-            os.getenv("BATCH_SIZE", "100"),
-        )
-    )
+    try:
 
-    logger.info(
-        "Starting fraud detection pipeline (batch_size=%s)",
-        batch_size,
-    )
+        return router.handle(event)
 
-    pipeline = PipelineService()
+    except Exception:
 
-    processed = pipeline.process_batch(
-        batch_size=batch_size
-    )
+        logger.exception("Unhandled Lambda exception.")
 
-    logger.info(
-        "Pipeline completed successfully."
-    )
+        MetricsService.lambda_failure()
 
-    return {
-        "statusCode": 200,
-        "transactions_processed": processed,
-    }
+        raise

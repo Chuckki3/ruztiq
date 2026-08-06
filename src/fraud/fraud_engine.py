@@ -10,48 +10,99 @@ class FraudEngine:
     Evaluates a transaction and returns a FraudResult.
     """
 
+    #
+    # Fraud score weights
+    #
+    HIGH_AMOUNT_SCORE = 30
+    LATE_NIGHT_SCORE = 15
+    ENTERTAINMENT_SCORE = 10
+    HIGH_VALUE_USSD_SCORE = 15
+    FAILED_PAYMENT_SCORE = 20
+
+    #
+    # Thresholds
+    #
+    HIGH_AMOUNT_THRESHOLD = 150_000
+    HIGH_VALUE_USSD_THRESHOLD = 100_000
+    ENTERTAINMENT_AMOUNT_THRESHOLD = 5_000
+
+    #
+    # Risk Levels
+    #
+    HIGH_RISK_THRESHOLD = 60
+    MEDIUM_RISK_THRESHOLD = 30
     FRAUD_THRESHOLD = 50
 
-    def evaluate(self, transaction):
+    #
+    # Time window
+    #
+    LATE_NIGHT_START = 0
+    LATE_NIGHT_END = 5
+
+    def evaluate(self, transaction) -> FraudResult:
+        """
+        Evaluate a transaction and return a FraudResult.
+        """
+
         score = 0
         reasons = []
 
+        #
         # High-value transaction
-        if transaction.amount > 150000:
-            score += 30
+        #
+        if transaction.amount > self.HIGH_AMOUNT_THRESHOLD:
+            score += self.HIGH_AMOUNT_SCORE
             reasons.append("High Amount")
 
+        #
         # Late-night transaction
-        if 0 <= transaction.transaction_time.hour <= 5:
-            score += 15
+        #
+        if (
+            self.LATE_NIGHT_START
+            <= transaction.transaction_time.hour
+            <= self.LATE_NIGHT_END
+        ):
+            score += self.LATE_NIGHT_SCORE
             reasons.append("Late Night")
 
+        #
         # Large entertainment spending
+        #
         if (
             transaction.merchant_category == "Entertainment"
-            and transaction.amount > 5000
+            and transaction.amount
+            > self.ENTERTAINMENT_AMOUNT_THRESHOLD
         ):
-            score += 10
+            score += self.ENTERTAINMENT_SCORE
             reasons.append("High Entertainment Spend")
 
+        #
         # High-value USSD transaction
+        #
         if (
             transaction.payment_method == "USSD"
-            and transaction.amount > 100000
+            and transaction.amount
+            > self.HIGH_VALUE_USSD_THRESHOLD
         ):
-            score += 15
+            score += self.HIGH_VALUE_USSD_SCORE
             reasons.append("High Value USSD")
 
+        #
         # Failed payment
+        #
         if transaction.status == "FAILED":
-            score += 20
+            score += self.FAILED_PAYMENT_SCORE
             reasons.append("Failed Payment")
 
-        # Determine risk level
-        if score >= 60:
+        #
+        # Risk level
+        #
+        if score >= self.HIGH_RISK_THRESHOLD:
             risk_level = "HIGH"
-        elif score >= 30:
+
+        elif score >= self.MEDIUM_RISK_THRESHOLD:
             risk_level = "MEDIUM"
+
         else:
             risk_level = "LOW"
 
@@ -59,9 +110,11 @@ class FraudEngine:
             transaction_reference=transaction.transaction_reference,
             risk_score=score,
             risk_level=risk_level,
-            is_fraud=(score >= self.FRAUD_THRESHOLD),
-            reasons=", ".join(reasons)
-            if reasons
-            else "No suspicious activity",
+            is_fraud=score >= self.FRAUD_THRESHOLD,
+            reasons=(
+                ", ".join(reasons)
+                if reasons
+                else "No suspicious activity"
+            ),
             evaluated_at=datetime.utcnow(),
         )

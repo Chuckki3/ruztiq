@@ -1,47 +1,38 @@
+import importlib
+
+
 MODULES = [
-    "src.config",
-    "src.services.database",
-    "src.models.customer",
+    "src.models.api_transaction",
     "src.models.transaction",
     "src.models.fraud_result",
-    "src.generators.customer_generator",
+
     "src.generators.transactions_generator",
-    "src.repositories.customer_repository",
+
     "src.repositories.transaction_repository",
     "src.repositories.fraud_repository",
-    "src.services.fraud_engine",
+
+    "src.fraud.fraud_engine",
+
+    "src.services.dynamodb",
+    "src.services.metrics_service",
+    "src.services.validation_service",
     "src.services.pipeline_service",
+    "src.services.request_router",
+
+    "src.lambda_function.handler",
 ]
 
 
-def main():
+def test_project_imports():
 
-    import importlib
-
-    print("=" * 50)
-    print("PROJECT INTEGRITY CHECK")
-    print("=" * 50)
-
-    passed = 0
+    failed = []
 
     for module in MODULES:
 
         try:
-
             importlib.import_module(module)
 
-            print(f"✓ {module}")
+        except Exception as exc:
+            failed.append(f"{module}: {exc}")
 
-            passed += 1
-
-        except Exception as e:
-
-            print(f"✗ {module}")
-            print(f"  {e}")
-
-    print("\n")
-    print(f"{passed}/{len(MODULES)} modules imported successfully.")
-
-
-if __name__ == "__main__":
-    main()
+    assert failed == [], "\n".join(failed)

@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 
-Description: SentinelIQ Fraud Detection Pipeline
+Description: SentinelIQ Fraud Detection Platform
 
 Globals:
   Function:
@@ -47,6 +47,7 @@ Resources:
     Type: AWS::Serverless::Function
 
     Properties:
+
       CodeUri: ..
 
       Handler: src/lambda_function/handler.lambda_handler
@@ -56,7 +57,20 @@ Resources:
       Architectures:
         - x86_64
 
+      Events:
+
+        ScoreAPI:
+
+          Type: Api
+
+          Properties:
+
+            Path: /score
+
+            Method: post
+
       Policies:
+
         - AWSLambdaBasicExecutionRole
 
         - DynamoDBCrudPolicy:
@@ -65,10 +79,23 @@ Resources:
         - DynamoDBCrudPolicy:
             TableName: !Ref FraudResultsTable
 
+        #
+        # CloudWatch Custom Metrics
+        #
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cloudwatch:PutMetricData
+              Resource: "*"
+
       Environment:
+
         Variables:
+
           BATCH_SIZE: "100"
+
           TRANSACTIONS_TABLE: !Ref TransactionsTable
+
           FRAUD_RESULTS_TABLE: !Ref FraudResultsTable
 
 Outputs:
@@ -77,10 +104,14 @@ Outputs:
     Description: Lambda ARN
     Value: !GetAtt FraudDetectionFunction.Arn
 
+  ApiEndpoint:
+    Description: API Gateway Endpoint
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/score"
+
   TransactionsTableName:
-    Description: Transactions DynamoDB Table
+    Description: Transactions Table
     Value: !Ref TransactionsTable
 
   FraudResultsTableName:
-    Description: Fraud Results DynamoDB Table
+    Description: Fraud Results Table
     Value: !Ref FraudResultsTable

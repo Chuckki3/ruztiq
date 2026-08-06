@@ -1,20 +1,45 @@
-from src.generators.transactions_generator import generate_transaction
 from src.fraud.fraud_engine import FraudEngine
 
-transaction = generate_transaction(customer_id=1)
 
-engine = FraudEngine()
+def test_normal_transaction(sample_transaction):
 
-result = engine.evaluate(transaction)
+    engine = FraudEngine()
 
-print(transaction)
+    result = engine.evaluate(sample_transaction)
 
-print()
+    assert result.risk_score == 30
+    assert result.risk_level == "MEDIUM"
+    assert result.is_fraud is False
 
-print(result)
 
-print()
+def test_high_risk_transaction(suspicious_transaction):
 
-print(result.risk_score)
-print(result.risk_level)
-print(result.reasons)
+    engine = FraudEngine()
+
+    result = engine.evaluate(
+        suspicious_transaction
+    )
+
+    assert result.risk_score == 90
+    assert result.risk_level == "HIGH"
+    assert result.is_fraud is True
+
+    assert (
+        "High Amount"
+        in result.reasons
+    )
+
+    assert (
+        "Failed Payment"
+        in result.reasons
+    )
+
+    assert (
+        "High Entertainment Spend"
+        in result.reasons
+    )
+
+    assert (
+        "High Value USSD"
+        in result.reasons
+    )
