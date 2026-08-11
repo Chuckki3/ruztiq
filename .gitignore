@@ -1,4 +1,10 @@
-# Python
+# Environment files and secrets
+
+.env
+.env.*
+env.json
+*.pem
+*.key# Python
 __pycache__/
 *.py[cod]
 *.so

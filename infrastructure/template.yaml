@@ -11,10 +11,15 @@ Globals:
 
 Resources:
 
+  ############################################################
+  # Transactions Table
+  ############################################################
+
   TransactionsTable:
     Type: AWS::DynamoDB::Table
 
     Properties:
+
       TableName: Transactions
 
       BillingMode: PAY_PER_REQUEST
@@ -27,10 +32,15 @@ Resources:
         - AttributeName: transaction_reference
           KeyType: HASH
 
+  ############################################################
+  # Fraud Results Table
+  ############################################################
+
   FraudResultsTable:
     Type: AWS::DynamoDB::Table
 
     Properties:
+
       TableName: FraudResults
 
       BillingMode: PAY_PER_REQUEST
@@ -42,6 +52,31 @@ Resources:
       KeySchema:
         - AttributeName: transaction_reference
           KeyType: HASH
+
+  ############################################################
+  # Customer Profiles Table
+  ############################################################
+
+  CustomerProfilesTable:
+    Type: AWS::DynamoDB::Table
+
+    Properties:
+
+      TableName: CustomerProfiles
+
+      BillingMode: PAY_PER_REQUEST
+
+      AttributeDefinitions:
+        - AttributeName: customer_id
+          AttributeType: N
+
+      KeySchema:
+        - AttributeName: customer_id
+          KeyType: HASH
+
+  ############################################################
+  # Lambda Function
+  ############################################################
 
   FraudDetectionFunction:
     Type: AWS::Serverless::Function
@@ -73,15 +108,23 @@ Resources:
 
         - AWSLambdaBasicExecutionRole
 
+        ####################################################
+        # DynamoDB Permissions
+        ####################################################
+
         - DynamoDBCrudPolicy:
             TableName: !Ref TransactionsTable
 
         - DynamoDBCrudPolicy:
             TableName: !Ref FraudResultsTable
 
-        #
-        # CloudWatch Custom Metrics
-        #
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CustomerProfilesTable
+
+        ####################################################
+        # CloudWatch Metrics
+        ####################################################
+
         - Statement:
             - Effect: Allow
               Action:
@@ -92,21 +135,43 @@ Resources:
 
         Variables:
 
+          ##################################################
+          # Existing
+          ##################################################
+
           BATCH_SIZE: "100"
 
           TRANSACTIONS_TABLE: !Ref TransactionsTable
 
           FRAUD_RESULTS_TABLE: !Ref FraudResultsTable
 
+          ##################################################
+          # NEW
+          ##################################################
+
+          CUSTOMER_PROFILES_TABLE: !Ref CustomerProfilesTable
+
 Outputs:
+
+  ############################################################
+  # Lambda
+  ############################################################
 
   FraudDetectionFunction:
     Description: Lambda ARN
     Value: !GetAtt FraudDetectionFunction.Arn
 
+  ############################################################
+  # API Gateway
+  ############################################################
+
   ApiEndpoint:
     Description: API Gateway Endpoint
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/score"
+
+  ############################################################
+  # Tables
+  ############################################################
 
   TransactionsTableName:
     Description: Transactions Table
@@ -115,3 +180,7 @@ Outputs:
   FraudResultsTableName:
     Description: Fraud Results Table
     Value: !Ref FraudResultsTable
+
+  CustomerProfilesTableName:
+    Description: Customer Profiles Table
+    Value: !Ref CustomerProfilesTable
