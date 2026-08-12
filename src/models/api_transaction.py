@@ -1,6 +1,6 @@
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from src.models.transaction import Transaction
 
@@ -36,7 +36,7 @@ class APITransaction:
             merchant_category=self.merchant_category,
             payment_method=self.payment_method,
             device_type=self.device_type,
-            transaction_time=datetime.utcnow(),
+            transaction_time=datetime.now(timezone.utc),
             location=self.location,
             ip_address=self.ip_address,
             status=self.status,
