@@ -1,5 +1,4 @@
-
-from datetime import datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from src.services.dynamodb import TRANSACTIONS_TABLE
@@ -14,17 +13,31 @@ class TransactionRepository:
     def insert_transaction(self, transaction):
         """
         Persist a transaction to DynamoDB.
+
+        The Transaction model is converted into a DynamoDB-
+        compatible dictionary before insertion.
+
+        Returns:
+            str: The persisted transaction reference.
         """
 
         item = transaction.to_dict()
 
-        item["amount"] = Decimal(
-            str(item["amount"])
-        )
+        # DynamoDB does not support Python floats directly.
+        # Convert monetary values to Decimal.
+        if "amount" in item:
+            item["amount"] = Decimal(
+                str(item["amount"])
+            )
 
-        item["transaction_time"] = (
-            item["transaction_time"].isoformat()
-        )
+        # Store transaction timestamps as ISO-8601 strings.
+        if isinstance(
+            item.get("transaction_time"),
+            datetime,
+        ):
+            item["transaction_time"] = (
+                item["transaction_time"].isoformat()
+            )
 
         TRANSACTIONS_TABLE.put_item(
             Item=item
@@ -37,8 +50,8 @@ class TransactionRepository:
         Return the total number of transactions.
 
         Note:
-        This uses Scan and is intended for development/
-        operational statistics, not high-volume analytics.
+            This uses Scan and is intended for development
+            and operational statistics, not high-volume analytics.
         """
 
         response = TRANSACTIONS_TABLE.scan(
@@ -78,7 +91,7 @@ class TransactionRepository:
         as a DynamoDB access pattern using a GSI.
 
         Returns:
-            List of transaction dictionaries.
+            list: Historical transaction dictionaries.
         """
 
         window_start = (
@@ -88,18 +101,18 @@ class TransactionRepository:
             )
         )
 
-        if window_start.tzinfo is None:
-
-            window_start = (
-                window_start.replace(
+        # Ensure transaction_time is timezone-aware UTC.
+        if transaction_time.tzinfo is None:
+            transaction_time = (
+                transaction_time.replace(
                     tzinfo=UTC
                 )
             )
 
-        if transaction_time.tzinfo is None:
-
-            transaction_time = (
-                transaction_time.replace(
+        # Ensure window_start is timezone-aware UTC.
+        if window_start.tzinfo is None:
+            window_start = (
+                window_start.replace(
                     tzinfo=UTC
                 )
             )
@@ -115,10 +128,11 @@ class TransactionRepository:
 
         for item in items:
 
+            # Only retrieve history belonging to
+            # the customer currently being evaluated.
             if item.get(
                 "customer_id"
             ) != customer_id:
-
                 continue
 
             timestamp = item.get(
@@ -126,11 +140,9 @@ class TransactionRepository:
             )
 
             if not timestamp:
-
                 continue
 
             try:
-
                 historical_time = (
                     datetime.fromisoformat(
                         timestamp
@@ -141,23 +153,23 @@ class TransactionRepository:
                 ValueError,
                 TypeError,
             ):
-
                 continue
 
+            # Normalise naive timestamps to UTC.
             if historical_time.tzinfo is None:
-
                 historical_time = (
                     historical_time.replace(
                         tzinfo=UTC
                     )
                 )
 
+            # Only include transactions inside
+            # the configured historical window.
             if (
                 window_start
                 <= historical_time
                 <= transaction_time
             ):
-
                 transactions.append(
                     item
                 )
