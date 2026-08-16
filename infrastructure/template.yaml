@@ -163,7 +163,7 @@ Resources:
           CUSTOMER_PROFILES_TABLE: "CustomerProfiles"
 
           # Explicit AWS region
-          AWS_REGION: "eu-west-1"
+        
 
   ############################################################
   # Outputs
