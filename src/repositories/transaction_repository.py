@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from src.models.transaction import Transaction
 from src.services.dynamodb import TRANSACTIONS_TABLE
 
 
@@ -13,35 +14,17 @@ class TransactionRepository:
     def insert_transaction(self, transaction):
         """
         Persist a transaction to DynamoDB.
-
-        The Transaction model is converted into a DynamoDB-
-        compatible dictionary before insertion.
-
-        Returns:
-            str: The persisted transaction reference.
         """
 
         item = transaction.to_dict()
 
-        # DynamoDB does not support Python floats directly.
-        # Convert monetary values to Decimal.
         if "amount" in item:
-            item["amount"] = Decimal(
-                str(item["amount"])
-            )
+            item["amount"] = Decimal(str(item["amount"]))
 
-        # Store transaction timestamps as ISO-8601 strings.
-        if isinstance(
-            item.get("transaction_time"),
-            datetime,
-        ):
-            item["transaction_time"] = (
-                item["transaction_time"].isoformat()
-            )
+        if isinstance(item.get("transaction_time"), datetime):
+            item["transaction_time"] = item["transaction_time"].isoformat()
 
-        TRANSACTIONS_TABLE.put_item(
-            Item=item
-        )
+        TRANSACTIONS_TABLE.put_item(Item=item)
 
         return item["transaction_reference"]
 
@@ -49,9 +32,7 @@ class TransactionRepository:
         """
         Return the total number of transactions.
 
-        Note:
-            This uses Scan and is intended for development
-            and operational statistics, not high-volume analytics.
+        Uses Scan for development and operational statistics.
         """
 
         response = TRANSACTIONS_TABLE.scan(
@@ -63,9 +44,6 @@ class TransactionRepository:
     def get_random_customer_id(self):
         """
         Temporary synthetic-data helper.
-
-        Replace with customer selection logic when
-        synthetic transaction generation becomes profile-aware.
         """
 
         return 1
@@ -77,101 +55,124 @@ class TransactionRepository:
         window_minutes=5,
     ):
         """
-        Retrieve transactions for a customer within
-        a configurable historical time window.
+        Retrieve historical transactions for a customer
+        within the configured velocity window.
 
-        This method currently uses DynamoDB Scan because
-        the existing Transactions table does not yet have
-        a customer_id GSI.
-
-        A production migration should add:
-
-            customer_id + transaction_time
-
-        as a DynamoDB access pattern using a GSI.
-
-        Returns:
-            list: Historical transaction dictionaries.
+        Uses the customer_id + transaction_time GSI.
         """
+
+        if transaction_time.tzinfo is None:
+            transaction_time = transaction_time.replace(
+                tzinfo=UTC
+            )
 
         window_start = (
             transaction_time
-            - timedelta(
-                minutes=window_minutes
-            )
+            - timedelta(minutes=window_minutes)
         )
 
-        # Ensure transaction_time is timezone-aware UTC.
-        if transaction_time.tzinfo is None:
-            transaction_time = (
-                transaction_time.replace(
-                    tzinfo=UTC
-                )
-            )
-
-        # Ensure window_start is timezone-aware UTC.
-        if window_start.tzinfo is None:
-            window_start = (
-                window_start.replace(
-                    tzinfo=UTC
-                )
-            )
-
-        response = TRANSACTIONS_TABLE.scan()
-
-        items = response.get(
-            "Items",
-            [],
+        response = TRANSACTIONS_TABLE.query(
+            IndexName="customer_id-transaction_time-index",
+            KeyConditionExpression=(
+                "customer_id = :customer_id "
+                "AND transaction_time BETWEEN :start_time "
+                "AND :end_time"
+            ),
+            ExpressionAttributeValues={
+                ":customer_id": customer_id,
+                ":start_time": window_start.isoformat(),
+                ":end_time": transaction_time.isoformat(),
+            },
         )
+
+        items = response.get("Items", [])
 
         transactions = []
 
         for item in items:
-
-            # Only retrieve history belonging to
-            # the customer currently being evaluated.
-            if item.get(
-                "customer_id"
-            ) != customer_id:
-                continue
-
-            timestamp = item.get(
-                "transaction_time"
-            )
+            timestamp = item.get("transaction_time")
 
             if not timestamp:
                 continue
 
             try:
-                historical_time = (
-                    datetime.fromisoformat(
-                        timestamp
-                    )
+                historical_time = datetime.fromisoformat(
+                    timestamp
+                )
+            except (ValueError, TypeError):
+                continue
+
+            if historical_time.tzinfo is None:
+                historical_time = historical_time.replace(
+                    tzinfo=UTC
+                )
+
+            amount = item.get("amount", 0)
+
+            if isinstance(amount, Decimal):
+                amount = float(amount)
+
+            try:
+                transaction = Transaction(
+                    customer_id=int(
+                        item["customer_id"]
+                    ),
+                    transaction_reference=str(
+                        item["transaction_reference"]
+                    ),
+                    amount=amount,
+                    merchant_name=str(
+                        item.get(
+                            "merchant_name",
+                            "",
+                        )
+                    ),
+                    merchant_category=str(
+                        item.get(
+                            "merchant_category",
+                            "",
+                        )
+                    ),
+                    payment_method=str(
+                        item.get(
+                            "payment_method",
+                            "",
+                        )
+                    ),
+                    device_type=str(
+                        item.get(
+                            "device_type",
+                            "",
+                        )
+                    ),
+                    transaction_time=historical_time,
+                    location=str(
+                        item.get(
+                            "location",
+                            "",
+                        )
+                    ),
+                    ip_address=str(
+                        item.get(
+                            "ip_address",
+                            "",
+                        )
+                    ),
+                    status=str(
+                        item.get(
+                            "status",
+                            "APPROVED",
+                        )
+                    ),
                 )
 
             except (
-                ValueError,
+                KeyError,
                 TypeError,
+                ValueError,
             ):
                 continue
 
-            # Normalise naive timestamps to UTC.
-            if historical_time.tzinfo is None:
-                historical_time = (
-                    historical_time.replace(
-                        tzinfo=UTC
-                    )
-                )
-
-            # Only include transactions inside
-            # the configured historical window.
-            if (
-                window_start
-                <= historical_time
-                <= transaction_time
-            ):
-                transactions.append(
-                    item
-                )
+            transactions.append(transaction)
 
         return transactions

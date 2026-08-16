@@ -19,7 +19,6 @@ Resources:
     Type: AWS::DynamoDB::Table
 
     Properties:
-
       TableName: Transactions
 
       BillingMode: PAY_PER_REQUEST
@@ -40,7 +39,6 @@ Resources:
     Type: AWS::DynamoDB::Table
 
     Properties:
-
       TableName: FraudResults
 
       BillingMode: PAY_PER_REQUEST
@@ -61,7 +59,6 @@ Resources:
     Type: AWS::DynamoDB::Table
 
     Properties:
-
       TableName: CustomerProfiles
 
       BillingMode: PAY_PER_REQUEST
@@ -75,14 +72,13 @@ Resources:
           KeyType: HASH
 
   ############################################################
-  # Lambda Function
+  # Fraud Detection Lambda
   ############################################################
 
   FraudDetectionFunction:
     Type: AWS::Serverless::Function
 
     Properties:
-
       CodeUri: ..
 
       Handler: src/lambda_function/handler.lambda_handler
@@ -92,64 +88,86 @@ Resources:
       Architectures:
         - x86_64
 
+      Timeout: 900
+
+      MemorySize: 512
+
+      ########################################################
+      # API Gateway
+      ########################################################
+
       Events:
-
         ScoreAPI:
-
           Type: Api
 
           Properties:
-
             Path: /score
-
             Method: post
+
+      ########################################################
+      # Lambda IAM Permissions
+      ########################################################
 
       Policies:
 
         - AWSLambdaBasicExecutionRole
 
-        ####################################################
-        # DynamoDB Permissions
-        ####################################################
+        ######################################################
+        # Transactions permissions
+        ######################################################
 
         - DynamoDBCrudPolicy:
-            TableName: !Ref TransactionsTable
+            TableName: Transactions
+
+        ######################################################
+        # Fraud Results permissions
+        ######################################################
 
         - DynamoDBCrudPolicy:
-            TableName: !Ref FraudResultsTable
+            TableName: FraudResults
+
+        ######################################################
+        # Customer Profiles permissions
+        ######################################################
 
         - DynamoDBCrudPolicy:
-            TableName: !Ref CustomerProfilesTable
+            TableName: CustomerProfiles
 
-        ####################################################
+        ######################################################
         # CloudWatch Metrics
-        ####################################################
+        ######################################################
 
         - Statement:
             - Effect: Allow
+
               Action:
                 - cloudwatch:PutMetricData
+
               Resource: "*"
 
-      Environment:
+      ########################################################
+      # Environment Variables
+      ########################################################
 
+      Environment:
         Variables:
 
-          ##################################################
-          # Existing
-          ##################################################
-
+          # Application configuration
           BATCH_SIZE: "100"
 
-          TRANSACTIONS_TABLE: !Ref TransactionsTable
+          # Explicit DynamoDB table names
+          TRANSACTIONS_TABLE: "Transactions"
 
-          FRAUD_RESULTS_TABLE: !Ref FraudResultsTable
+          FRAUD_RESULTS_TABLE: "FraudResults"
 
-          ##################################################
-          # NEW
-          ##################################################
+          CUSTOMER_PROFILES_TABLE: "CustomerProfiles"
 
-          CUSTOMER_PROFILES_TABLE: !Ref CustomerProfilesTable
+          # Explicit AWS region
+          AWS_REGION: "eu-west-1"
+
+  ############################################################
+  # Outputs
+  ############################################################
 
 Outputs:
 
@@ -157,8 +175,9 @@ Outputs:
   # Lambda
   ############################################################
 
-  FraudDetectionFunction:
-    Description: Lambda ARN
+  FraudDetectionFunctionArn:
+    Description: SentinelIQ Fraud Detection Lambda ARN
+
     Value: !GetAtt FraudDetectionFunction.Arn
 
   ############################################################
@@ -166,21 +185,26 @@ Outputs:
   ############################################################
 
   ApiEndpoint:
-    Description: API Gateway Endpoint
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/score"
+    Description: SentinelIQ Fraud Detection API Endpoint
+
+    Value:
+      !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/score"
 
   ############################################################
-  # Tables
+  # DynamoDB Tables
   ############################################################
 
   TransactionsTableName:
-    Description: Transactions Table
-    Value: !Ref TransactionsTable
+    Description: SentinelIQ Transactions DynamoDB Table
+
+    Value: Transactions
 
   FraudResultsTableName:
-    Description: Fraud Results Table
-    Value: !Ref FraudResultsTable
+    Description: SentinelIQ Fraud Results DynamoDB Table
+
+    Value: FraudResults
 
   CustomerProfilesTableName:
-    Description: Customer Profiles Table
-    Value: !Ref CustomerProfilesTable
+    Description: SentinelIQ Customer Profiles DynamoDB Table
+
+    Value: CustomerProfiles

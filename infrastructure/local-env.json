@@ -1,0 +1,9 @@
+{
+  "FraudDetectionFunction": {
+    "AWS_REGION": "eu-west-1",
+    "AWS_DEFAULT_REGION": "eu-west-1",
+    "TRANSACTIONS_TABLE": "Transactions",
+    "FRAUD_RESULTS_TABLE": "FraudResults",
+    "CUSTOMER_PROFILES_TABLE": "CustomerProfiles"
+  }
+}

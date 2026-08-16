@@ -11,6 +11,59 @@ class CustomerProfileRepository:
     in DynamoDB.
     """
 
+    # ==========================================================
+    # DYNAMODB SERIALIZATION
+    # ==========================================================
+
+    @staticmethod
+    def _convert_floats_to_decimal(value):
+        """
+        Recursively convert Python floats to Decimal.
+
+        DynamoDB does not support Python float values.
+        This conversion handles floats inside:
+
+        - dictionaries
+        - lists
+        - tuples
+        - nested structures
+
+        Other values are returned unchanged.
+        """
+
+        if isinstance(value, float):
+            return Decimal(str(value))
+
+        if isinstance(value, dict):
+            return {
+                key: CustomerProfileRepository._convert_floats_to_decimal(
+                    item
+                )
+                for key, item in value.items()
+            }
+
+        if isinstance(value, list):
+            return [
+                CustomerProfileRepository._convert_floats_to_decimal(
+                    item
+                )
+                for item in value
+            ]
+
+        if isinstance(value, tuple):
+            return tuple(
+                CustomerProfileRepository._convert_floats_to_decimal(
+                    item
+                )
+                for item in value
+            )
+
+        return value
+
+    # ==========================================================
+    # RETRIEVE PROFILE
+    # ==========================================================
+
     def get_profile(self, customer_id):
         """
         Retrieve an existing customer profile.
@@ -27,9 +80,9 @@ class CustomerProfileRepository:
         if not item:
             return None
 
-        #
-        # DynamoDB Decimal -> Python float
-        #
+        # ======================================================
+        # DYNAMODB DECIMAL -> PYTHON FLOAT
+        # ======================================================
 
         item["total_amount"] = float(
             item.get("total_amount", 0)
@@ -47,9 +100,9 @@ class CustomerProfileRepository:
             item.get("lowest_amount", 0)
         )
 
-        #
-        # DynamoDB numbers
-        #
+        # ======================================================
+        # DYNAMODB NUMBERS
+        # ======================================================
 
         item["total_transactions"] = int(
             item.get("total_transactions", 0)
@@ -63,9 +116,9 @@ class CustomerProfileRepository:
             item.get("successful_transactions", 0)
         )
 
-        #
-        # Date conversion
-        #
+        # ======================================================
+        # DATE CONVERSION
+        # ======================================================
 
         first_seen = item.get("first_seen")
 
@@ -85,9 +138,9 @@ class CustomerProfileRepository:
         else:
             item["last_seen"] = None
 
-        #
-        # Lists
-        #
+        # ======================================================
+        # LISTS
+        # ======================================================
 
         item["known_devices"] = item.get(
             "known_devices",
@@ -121,6 +174,10 @@ class CustomerProfileRepository:
 
         return CustomerProfile(**item)
 
+    # ==========================================================
+    # CREATE PROFILE
+    # ==========================================================
+
     def create_profile(self, customer_id):
         """
         Create an empty behavioural profile.
@@ -134,36 +191,39 @@ class CustomerProfileRepository:
 
         return profile
 
+    # ==========================================================
+    # SAVE PROFILE
+    # ==========================================================
+
     def save(self, profile):
         """
         Persist a customer profile to DynamoDB.
+
+        All Python float values are recursively converted
+        to Decimal before the DynamoDB write.
         """
 
         item = profile.to_dict()
 
-        #
-        # Python floats -> DynamoDB Decimal
-        #
+        # ======================================================
+        # RECURSIVE FLOAT -> DECIMAL CONVERSION
+        # ======================================================
 
-        item["total_amount"] = Decimal(
-            str(item["total_amount"])
+        item = self._convert_floats_to_decimal(
+            item
         )
 
-        item["average_amount"] = Decimal(
-            str(item["average_amount"])
-        )
-
-        item["highest_amount"] = Decimal(
-            str(item["highest_amount"])
-        )
-
-        item["lowest_amount"] = Decimal(
-            str(item["lowest_amount"])
-        )
+        # ======================================================
+        # PERSIST
+        # ======================================================
 
         CUSTOMER_PROFILES_TABLE.put_item(
             Item=item
         )
+
+    # ==========================================================
+    # GET OR CREATE
+    # ==========================================================
 
     def get_or_create(self, customer_id):
         """
