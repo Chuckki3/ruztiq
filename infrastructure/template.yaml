@@ -1,7 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 
-Description: SentinelIQ Fraud Detection Platform
+Description: >
+  SentinelIQ Fraud Detection Platform.
+  Real-time fraud scoring with DynamoDB Streams and PostgreSQL analytics synchronization.
 
 Globals:
   Function:
@@ -31,6 +33,7 @@ Resources:
         - AttributeName: transaction_reference
           KeyType: HASH
 
+
   ############################################################
   # Fraud Results Table
   ############################################################
@@ -50,6 +53,14 @@ Resources:
       KeySchema:
         - AttributeName: transaction_reference
           KeyType: HASH
+
+      ########################################################
+      # DynamoDB Stream
+      ########################################################
+
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+
 
   ############################################################
   # Customer Profiles Table
@@ -71,6 +82,7 @@ Resources:
         - AttributeName: customer_id
           KeyType: HASH
 
+
   ############################################################
   # Fraud Detection Lambda
   ############################################################
@@ -79,6 +91,7 @@ Resources:
     Type: AWS::Serverless::Function
 
     Properties:
+
       CodeUri: ..
 
       Handler: src/lambda_function/handler.lambda_handler
@@ -97,6 +110,7 @@ Resources:
       ########################################################
 
       Events:
+
         ScoreAPI:
           Type: Api
 
@@ -105,29 +119,33 @@ Resources:
             Method: post
 
       ########################################################
-      # Lambda IAM Permissions
+      # IAM Permissions
       ########################################################
 
       Policies:
 
+        ######################################################
+        # CloudWatch Logs
+        ######################################################
+
         - AWSLambdaBasicExecutionRole
 
         ######################################################
-        # Transactions permissions
+        # Transactions Table
         ######################################################
 
         - DynamoDBCrudPolicy:
             TableName: Transactions
 
         ######################################################
-        # Fraud Results permissions
+        # Fraud Results Table
         ######################################################
 
         - DynamoDBCrudPolicy:
             TableName: FraudResults
 
         ######################################################
-        # Customer Profiles permissions
+        # Customer Profiles Table
         ######################################################
 
         - DynamoDBCrudPolicy:
@@ -150,20 +168,141 @@ Resources:
       ########################################################
 
       Environment:
+
         Variables:
 
-          # Application configuration
           BATCH_SIZE: "100"
 
-          # Explicit DynamoDB table names
           TRANSACTIONS_TABLE: "Transactions"
 
           FRAUD_RESULTS_TABLE: "FraudResults"
 
           CUSTOMER_PROFILES_TABLE: "CustomerProfiles"
 
-          # Explicit AWS region
-        
+          AWS_REGION_NAME: "eu-west-1"
+
+
+  ############################################################
+  # PostgreSQL Synchronization Lambda
+  ############################################################
+  #
+  # Triggered by DynamoDB Streams.
+  #
+  # Flow:
+  #
+  # FraudResults
+  #      |
+  #      v
+  # DynamoDB Stream
+  #      |
+  #      v
+  # Sync Lambda
+  #      |
+  #      v
+  # PostgreSQL
+  #      |
+  #      v
+  # fraud_results_analytics
+  #
+  ############################################################
+
+  FraudResultsSyncFunction:
+    Type: AWS::Serverless::Function
+
+    Properties:
+
+      CodeUri: ..
+
+      Handler: src/lambda_function/sync_handler.lambda_handler
+
+      Runtime: python3.11
+
+      Architectures:
+        - x86_64
+
+      Timeout: 60
+
+      MemorySize: 256
+
+      ########################################################
+      # DynamoDB Stream Event
+      ########################################################
+
+      Events:
+
+        FraudResultsStream:
+          Type: DynamoDB
+
+          Properties:
+
+            Stream:
+              !GetAtt FraudResultsTable.StreamArn
+
+            StartingPosition: LATEST
+
+            BatchSize: 10
+
+            Enabled: true
+
+      ########################################################
+      # IAM Permissions
+      ########################################################
+
+      Policies:
+
+        ######################################################
+        # CloudWatch Logs
+        ######################################################
+
+        - AWSLambdaBasicExecutionRole
+
+        ######################################################
+        # DynamoDB Stream Read Permissions
+        ######################################################
+
+        - Statement:
+
+            - Effect: Allow
+
+              Action:
+
+                - dynamodb:GetRecords
+                - dynamodb:GetShardIterator
+                - dynamodb:DescribeStream
+                - dynamodb:ListStreams
+
+              Resource:
+                - !GetAtt FraudResultsTable.StreamArn
+
+      ########################################################
+      # Environment Variables
+      ########################################################
+
+      Environment:
+
+        Variables:
+
+          AWS_REGION_NAME: "eu-west-1"
+
+          DB_HOST: "localhost"
+
+          DB_PORT: "5432"
+
+          DB_NAME: "fintech_fraud"
+
+          DB_USER: "postgres"
+
+          ####################################################
+          # IMPORTANT:
+          #
+          # DB_PASSWORD should NOT be placed directly inside
+          # this template.
+          #
+          # The local .env file is used for local testing.
+          #
+          # Production should use AWS Secrets Manager.
+          ####################################################
+
 
   ############################################################
   # Outputs
@@ -172,39 +311,84 @@ Resources:
 Outputs:
 
   ############################################################
-  # Lambda
+  # Fraud Detection Lambda
   ############################################################
 
   FraudDetectionFunctionArn:
-    Description: SentinelIQ Fraud Detection Lambda ARN
 
-    Value: !GetAtt FraudDetectionFunction.Arn
+    Description: >
+      SentinelIQ Fraud Detection Lambda ARN
+
+    Value:
+      !GetAtt FraudDetectionFunction.Arn
+
+
+  ############################################################
+  # Fraud Results Sync Lambda
+  ############################################################
+
+  FraudResultsSyncFunctionArn:
+
+    Description: >
+      SentinelIQ DynamoDB to PostgreSQL synchronization Lambda ARN
+
+    Value:
+      !GetAtt FraudResultsSyncFunction.Arn
+
 
   ############################################################
   # API Gateway
   ############################################################
 
   ApiEndpoint:
-    Description: SentinelIQ Fraud Detection API Endpoint
+
+    Description: >
+      SentinelIQ Fraud Detection API Endpoint
 
     Value:
-      !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/score"
+      !Sub >
+        https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/score
+
 
   ############################################################
   # DynamoDB Tables
   ############################################################
 
   TransactionsTableName:
-    Description: SentinelIQ Transactions DynamoDB Table
 
-    Value: Transactions
+    Description: >
+      SentinelIQ Transactions DynamoDB Table
+
+    Value:
+      !Ref TransactionsTable
+
 
   FraudResultsTableName:
-    Description: SentinelIQ Fraud Results DynamoDB Table
 
-    Value: FraudResults
+    Description: >
+      SentinelIQ Fraud Results DynamoDB Table
+
+    Value:
+      !Ref FraudResultsTable
+
 
   CustomerProfilesTableName:
-    Description: SentinelIQ Customer Profiles DynamoDB Table
 
-    Value: CustomerProfiles
+    Description: >
+      SentinelIQ Customer Profiles DynamoDB Table
+
+    Value:
+      !Ref CustomerProfilesTable
+
+
+  ############################################################
+  # DynamoDB Stream
+  ############################################################
+
+  FraudResultsStreamArn:
+
+    Description: >
+      DynamoDB Stream ARN for FraudResults
+
+    Value:
+      !GetAtt FraudResultsTable.StreamArn
