@@ -43,3 +43,16 @@ htmlcov/
 
 # Local outputs
 response.json
+
+# AWS SAM build/deployment artifacts
+build/
+lambda_build/
+deployment.zip
+
+# SAM local/deployment configuration
+.aws-sam/
+
+# AWS SAM build/deployment artifacts
+build/
+lambda_build/
+deployment.zip
