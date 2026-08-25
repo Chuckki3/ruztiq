@@ -1,6 +1,6 @@
 class BehaviorEngine:
     """
-    SentinelIQ behavioural intelligence engine.
+    RuztIQ behavioural intelligence engine.
 
     Compares an incoming transaction against the customer's
     previously learned behavioural profile.

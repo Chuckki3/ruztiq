@@ -8,10 +8,10 @@ cloudwatch = boto3.client("cloudwatch")
 
 class MetricsService:
     """
-    Publishes custom CloudWatch metrics for SentinelIQ.
+    Publishes custom CloudWatch metrics for RuztIQ.
     """
 
-    NAMESPACE = "SentinelIQ"
+    NAMESPACE = "RuztIQ"
 
     @classmethod
     def publish_metric(

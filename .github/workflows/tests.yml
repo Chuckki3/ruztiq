@@ -1,4 +1,4 @@
-name: SentinelIQ CI
+name: RuztIQ CI
 
 on:
   push:

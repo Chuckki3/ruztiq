@@ -31,7 +31,7 @@ dynamodb = boto3.resource(
 #
 # Lambda/SAM supplies these through environment variables.
 #
-# Local development falls back to the SentinelIQ
+# Local development falls back to the RuztIQ
 # table names.
 # ---------------------------------------------------------
 

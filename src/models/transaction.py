@@ -6,7 +6,7 @@ from typing import Any
 @dataclass(slots=True)
 class Transaction:
     """
-    Represents a financial transaction processed by SentinelIQ.
+    Represents a financial transaction processed by RuztIQ.
     """
 
     customer_id: int

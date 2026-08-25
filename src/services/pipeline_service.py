@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 class PipelineService:
     """
-    Coordinates the SentinelIQ fraud detection pipeline.
+    Coordinates the RuztIQ fraud detection pipeline.
 
     Production processing order:
 
@@ -61,7 +61,7 @@ class PipelineService:
     The customer's profile is evaluated BEFORE the current
     transaction is learned.
 
-    This prevents SentinelIQ from accidentally treating a
+    This prevents RuztIQ from accidentally treating a
     suspicious new device, merchant, IP, location, or payment
     method as already trusted.
     """
@@ -105,23 +105,23 @@ class PipelineService:
         #
 
         self.review_threshold = self._get_threshold(
-            "SENTINELIQ_REVIEW_THRESHOLD",
+            "RUZTIQ_REVIEW_THRESHOLD",
             40,
         )
 
         self.decline_threshold = self._get_threshold(
-            "SENTINELIQ_DECLINE_THRESHOLD",
+            "RUZTIQ_DECLINE_THRESHOLD",
             80,
         )
 
         if self.review_threshold >= self.decline_threshold:
             raise ValueError(
-                "SENTINELIQ_REVIEW_THRESHOLD must be lower "
-                "than SENTINELIQ_DECLINE_THRESHOLD"
+                "RUZTIQ_REVIEW_THRESHOLD must be lower "
+                "than RUZTIQ_DECLINE_THRESHOLD"
             )
 
         logger.info(
-            "SentinelIQ decision thresholds | "
+            "RuztIQ decision thresholds | "
             "APPROVE < %s | REVIEW %s-%s | DECLINE >= %s",
             self.review_threshold,
             self.review_threshold,
@@ -360,7 +360,7 @@ class PipelineService:
         - SQS
         - internal service
 
-        The method returns the complete SentinelIQ decision
+        The method returns the complete RuztIQ decision
         package while preserving the existing persistence and
         customer-learning behaviour.
         """

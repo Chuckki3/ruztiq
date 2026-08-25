@@ -6,7 +6,7 @@ from typing import List, Optional
 @dataclass
 class CustomerProfile:
     """
-    Persistent behavioural profile for a SentinelIQ customer.
+    Persistent behavioural profile for a RuztIQ customer.
 
     The profile learns progressively from transactions and provides
     the historical context required for behavioural fraud detection.

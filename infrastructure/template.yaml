@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 
 Description: >
-  SentinelIQ serverless fraud detection pipeline.
+  RuztIQ serverless fraud detection pipeline.
   Exposes a fraud scoring API through API Gateway,
   processes transactions with Lambda and DynamoDB,
   and synchronizes fraud results to PostgreSQL.
@@ -84,7 +84,7 @@ Resources:
         - AWSLambdaBasicExecutionRole
 
 
-        # Allow access to SentinelIQ DynamoDB tables
+        # Allow access to RuztIQ DynamoDB tables
         - Statement:
 
             - Effect: Allow
@@ -248,7 +248,7 @@ Outputs:
 
   ApiEndpoint:
 
-    Description: SentinelIQ Fraud Detection API Endpoint
+    Description: RuztIQ Fraud Detection API Endpoint
 
     Value:
       !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/score"
@@ -260,7 +260,7 @@ Outputs:
 
   FraudDetectionFunctionArn:
 
-    Description: SentinelIQ Fraud Detection Lambda ARN
+    Description: RuztIQ Fraud Detection Lambda ARN
 
     Value:
       !GetAtt FraudDetectionFunction.Arn
@@ -272,7 +272,7 @@ Outputs:
 
   FraudResultsSyncFunctionArn:
 
-    Description: SentinelIQ DynamoDB to PostgreSQL synchronization Lambda ARN
+    Description: RuztIQ DynamoDB to PostgreSQL synchronization Lambda ARN
 
     Value:
       !GetAtt FraudResultsSyncFunction.Arn
@@ -284,21 +284,21 @@ Outputs:
 
   TransactionsTableName:
 
-    Description: Existing SentinelIQ Transactions DynamoDB Table
+    Description: Existing RuztIQ Transactions DynamoDB Table
 
     Value: Transactions
 
 
   FraudResultsTableName:
 
-    Description: Existing SentinelIQ Fraud Results DynamoDB Table
+    Description: Existing RuztIQ Fraud Results DynamoDB Table
 
     Value: FraudResults
 
 
   CustomerProfilesTableName:
 
-    Description: Existing SentinelIQ Customer Profiles DynamoDB Table
+    Description: Existing RuztIQ Customer Profiles DynamoDB Table
 
     Value: CustomerProfiles
 

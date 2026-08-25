@@ -13,7 +13,7 @@ logger.setLevel(logging.INFO)
 # AWS Secrets Manager
 # ---------------------------------------------------------------------------
 
-SECRET_NAME = os.environ.get("DB_SECRET_NAME", "sentineliq/rds/postgres")
+SECRET_NAME = os.environ.get("DB_SECRET_NAME", "ruztiq/rds/postgres")
 secrets_client = boto3.client("secretsmanager")
 
 # ---------------------------------------------------------------------------

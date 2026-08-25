@@ -5,7 +5,7 @@ from src.models.fraud_result import FraudResult
 
 class FraudEngine:
     """
-    SentinelIQ fraud detection engine.
+    RuztIQ fraud detection engine.
 
     Combines:
     - Transaction-level rules

@@ -14,7 +14,7 @@ class DecisionResult:
 
 class DecisionEngine:
     """
-    Converts SentinelIQ's fraud risk score into an
+    Converts RuztIQ's fraud risk score into an
     authorization decision.
 
     Decision policy:

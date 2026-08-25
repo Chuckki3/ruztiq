@@ -7,7 +7,7 @@ class CustomerProfileService:
     """
     Maintains and learns customer behavioural profiles.
 
-    SentinelIQ uses these profiles to understand what is
+    RuztIQ uses these profiles to understand what is
     normal for each customer and identify behavioural changes
     that may indicate fraud.
 
@@ -52,7 +52,7 @@ class CustomerProfileService:
         Learn from a transaction and update the customer's
         behavioural profile.
 
-        The profile becomes progressively richer as SentinelIQ
+        The profile becomes progressively richer as RuztIQ
         processes more transactions for the customer.
         """
 

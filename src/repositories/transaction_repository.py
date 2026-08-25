@@ -7,7 +7,7 @@ from src.services.dynamodb import TRANSACTIONS_TABLE
 
 class TransactionRepository:
     """
-    Repository for SentinelIQ transaction persistence
+    Repository for RuztIQ transaction persistence
     and behavioural transaction-history queries.
     """
 
