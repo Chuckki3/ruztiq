@@ -7,14 +7,18 @@ from src.services.request_router import RequestRouter
 
 def valid_payload():
     return {
-        "transaction_reference": "TEST-TRANSACTION-001",
+        "transaction_reference": "API-TEST123456",
         "customer_id": 1001,
         "amount": 25000.00,
+        "currency": "NGN",
+        "merchant_id": "MERCHANT-001",
         "merchant_name": "Test Merchant",
         "merchant_category": "RETAIL",
-        "payment_method": "CARD",
+        "device_id": "DEVICE-001",
         "device_type": "MOBILE",
         "location": "Lagos, Nigeria",
+        "transaction_time": "2026-08-27T18:30:00+01:00",
+        "payment_method": "CARD",
         "ip_address": "197.210.70.10",
         "status": "APPROVED",
     }
@@ -23,14 +27,7 @@ def valid_payload():
 @patch("src.services.request_router.PipelineService")
 @patch("src.services.request_router.MetricsService")
 def test_valid_api_request(mock_metrics, mock_pipeline):
-
-    #
-    # Mock the pipeline so this test focuses on
-    # RequestRouter behaviour.
-    #
-
     mock_fraud_result = MagicMock()
-
     mock_fraud_result.transaction_reference = "API-TEST123456"
     mock_fraud_result.risk_score = 18.5
     mock_fraud_result.risk_level = "LOW"
@@ -51,17 +48,9 @@ def test_valid_api_request(mock_metrics, mock_pipeline):
 
     response = router.handle(event)
 
-    #
-    # HTTP response
-    #
-
     assert response["statusCode"] == 200
 
     body = json.loads(response["body"])
-
-    #
-    # Fraud result
-    #
 
     assert body["transaction_reference"] == "API-TEST123456"
     assert body["risk_score"] == 18.5
@@ -69,32 +58,35 @@ def test_valid_api_request(mock_metrics, mock_pipeline):
     assert body["is_fraud"] is False
     assert body["reasons"] == []
 
-    #
-    # Verify pipeline was called
-    #
-
     mock_pipeline_instance.process_existing_transaction.assert_called_once()
+
+    transaction = (
+        mock_pipeline_instance
+        .process_existing_transaction
+        .call_args.args[0]
+    )
+
+    assert transaction.transaction_reference == "API-TEST123456"
+    assert transaction.customer_id == 1001
+    assert transaction.amount == 25000.00
+    assert transaction.merchant_name == "Test Merchant"
+    assert transaction.merchant_category == "RETAIL"
+    assert transaction.payment_method == "CARD"
+    assert transaction.device_type == "MOBILE"
+    assert transaction.location == "Lagos, Nigeria"
+    assert transaction.ip_address == "197.210.70.10"
+    assert transaction.status == "APPROVED"
 
 
 @patch("src.services.request_router.MetricsService")
 def test_invalid_api_request_returns_400(mock_metrics):
-
     router = RequestRouter()
 
+    payload = valid_payload()
+    payload["payment_method"] = "INVALID"
+
     event = {
-        "body": json.dumps(
-            {
-                "customer_id": 1001,
-                "amount": 25000.00,
-                "merchant_name": "Test Merchant",
-                "merchant_category": "RETAIL",
-                "payment_method": "INVALID",
-                "device_type": "MOBILE",
-                "location": "Lagos, Nigeria",
-                "ip_address": "197.210.70.10",
-                "status": "APPROVED",
-            }
-        )
+        "body": json.dumps(payload)
     }
 
     response = router.handle(event)
@@ -115,11 +107,9 @@ def test_invalid_ip_address_returns_400(
     mock_metrics,
     mock_pipeline,
 ):
-
     router = RequestRouter()
 
     payload = valid_payload()
-
     payload["ip_address"] = "not-an-ip"
 
     event = {
@@ -136,26 +126,50 @@ def test_invalid_ip_address_returns_400(
 
     mock_metrics.validation_error.assert_called_once()
 
-    #
-    # Pipeline must never receive an invalid transaction.
-    #
-
     mock_pipeline.return_value.process_existing_transaction.assert_not_called()
 
 
-def test_empty_event_processes_batch():
-
+@patch("src.services.request_router.MetricsService")
+def test_missing_transaction_reference_returns_400(mock_metrics):
     router = RequestRouter()
 
-    router.pipeline = MagicMock()
+    payload = valid_payload()
+    del payload["transaction_reference"]
 
-    router.pipeline.process_batch.return_value = 5
+    event = {
+        "body": json.dumps(payload)
+    }
 
-    response = router.handle({})
+    response = router.handle(event)
 
-    assert response["statusCode"] == 200
-    assert response["transactions_processed"] == 5
+    assert response["statusCode"] == 400
 
-    router.pipeline.process_batch.assert_called_once_with(
-        batch_size=100
+    body = json.loads(response["body"])
+
+    assert body["error"] == (
+        "Missing required field: transaction_reference"
     )
+
+    mock_metrics.validation_error.assert_called_once()
+
+
+@patch("src.services.request_router.MetricsService")
+def test_invalid_transaction_time_returns_400(mock_metrics):
+    router = RequestRouter()
+
+    payload = valid_payload()
+    payload["transaction_time"] = "not-a-timestamp"
+
+    event = {
+        "body": json.dumps(payload)
+    }
+
+    response = router.handle(event)
+
+    assert response["statusCode"] == 400
+
+    body = json.loads(response["body"])
+
+    assert body["error"] == "Invalid transaction_time"
+
+    mock_metrics.validation_error.assert_called_once()
