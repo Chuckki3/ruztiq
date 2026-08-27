@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, UTC
 
 import pytest
 
@@ -31,7 +31,15 @@ def sample_transaction():
         merchant_category="Shopping",
         payment_method="CARD",
         device_type="Mobile",
-        transaction_time=datetime.utcnow(),
+        transaction_time=datetime(
+            2026,
+            8,
+            27,
+            12,
+            0,
+            0,
+            tzinfo=UTC,
+        ),
         location="Lagos",
         ip_address="102.89.45.1",
         status="APPROVED",
@@ -49,7 +57,15 @@ def suspicious_transaction():
         merchant_category="Entertainment",
         payment_method="USSD",
         device_type="Mobile",
-        transaction_time=datetime.utcnow().replace(hour=2),
+        transaction_time=datetime(
+            2026,
+            8,
+            27,
+            2,
+            0,
+            0,
+            tzinfo=UTC,
+        ),
         location="Lagos",
         ip_address="102.89.45.1",
         status="FAILED",

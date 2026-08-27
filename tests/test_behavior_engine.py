@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, UTC
 
 from src.behaviour.behaviour_engine import BehaviorEngine
 from src.models.customer_profile import CustomerProfile
@@ -8,8 +8,8 @@ def make_profile():
 
     return CustomerProfile(
         customer_id=1,
-        first_seen=datetime.utcnow(),
-        last_seen=datetime.utcnow(),
+        first_seen=datetime.now(UTC),
+        last_seen=datetime.now(UTC),
         total_transactions=20,
         total_amount=200000,
         average_amount=10000,
@@ -64,7 +64,7 @@ def make_transaction(
     transaction.merchant_name = merchant_name
     transaction.ip_address = ip_address
     transaction.amount = amount
-    transaction.transaction_time = datetime.utcnow()
+    transaction.transaction_time = datetime.now(UTC)
     transaction.status = "APPROVED"
 
     return transaction
