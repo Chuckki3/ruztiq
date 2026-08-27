@@ -7,6 +7,7 @@ from src.services.request_router import RequestRouter
 
 def valid_payload():
     return {
+        "transaction_reference": "TEST-TRANSACTION-001",
         "customer_id": 1001,
         "amount": 25000.00,
         "merchant_name": "Test Merchant",

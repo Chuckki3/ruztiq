@@ -1,4 +1,3 @@
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -11,6 +10,7 @@ class APITransaction:
     Represents an incoming transaction received through the API.
     """
 
+    transaction_reference: str
     customer_id: int
     amount: float
     merchant_name: str
@@ -28,9 +28,7 @@ class APITransaction:
 
         return Transaction(
             customer_id=self.customer_id,
-            transaction_reference=(
-                f"API-{uuid.uuid4().hex[:12].upper()}"
-            ),
+            transaction_reference=self.transaction_reference,
             amount=self.amount,
             merchant_name=self.merchant_name,
             merchant_category=self.merchant_category,
