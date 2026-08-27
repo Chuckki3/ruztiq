@@ -1,4 +1,5 @@
 import logging
+
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -16,8 +17,8 @@ class DecisionResult:
 
 class DecisionEngine:
     """
-    Converts RuztIQ fraud and velocity signals into
-    an operational transaction decision.
+    Converts RuztIQ fraud and velocity signals into an
+    operational transaction decision.
 
     Decision hierarchy:
 
@@ -40,10 +41,16 @@ class DecisionEngine:
     FraudEngine remains responsible for calculating
     fraud risk. DecisionEngine is responsible only for
     authorization policy.
+
+    Default policy:
+
+        0 - 39   -> APPROVE
+        40 - 79  -> REVIEW
+        80+      -> DECLINE
     """
 
-    REVIEW_THRESHOLD = 30
-    DECLINE_THRESHOLD = 60
+    REVIEW_THRESHOLD = 40
+    DECLINE_THRESHOLD = 80
 
     @classmethod
     def decide(cls, fraud_result, velocity_result=None):

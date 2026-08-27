@@ -7,10 +7,6 @@ Description: >
   processes transactions with Lambda and DynamoDB,
   and synchronizes fraud results to PostgreSQL.
 
-############################################################
-# PARAMETERS
-############################################################
-
 Parameters:
 
   DBSecretArn:
@@ -34,282 +30,140 @@ Parameters:
     Description: ARN of the existing FraudResults DynamoDB Stream
 
 
-############################################################
-# RESOURCES
-############################################################
-
 Resources:
-
-  ##########################################################
-  # FRAUD DETECTION FUNCTION
-  ##########################################################
 
   FraudDetectionFunction:
     Type: AWS::Serverless::Function
 
     Properties:
-
       CodeUri: ..
-
       Handler: src/lambda_function/handler.lambda_handler
-
       Runtime: python3.11
-
       Timeout: 60
-
       MemorySize: 256
 
-
-      ######################################################
-      # API GATEWAY
-      ######################################################
-
       Events:
-
         ScoreTransaction:
           Type: Api
-
           Properties:
             Path: /score
             Method: post
 
-
-      ######################################################
-      # IAM PERMISSIONS
-      ######################################################
-
       Policies:
 
-        # Allow Lambda to write logs to CloudWatch Logs
         - AWSLambdaBasicExecutionRole
 
-
-        # Allow access to RuztIQ DynamoDB tables
         - Statement:
-
             - Effect: Allow
-
               Action:
-
                 - dynamodb:GetItem
                 - dynamodb:PutItem
                 - dynamodb:UpdateItem
                 - dynamodb:Query
                 - dynamodb:Scan
-
               Resource:
-
-                # Transactions table
                 - !Ref TransactionsTableArn
-
-                # Transactions table secondary indexes
                 - !Sub "${TransactionsTableArn}/index/*"
-
-                # Fraud results table
                 - !Ref FraudResultsTableArn
-
-                # Customer profiles table
                 - !Ref CustomerProfilesTableArn
 
-
-        # Allow publishing custom CloudWatch metrics
         - Statement:
-
             - Effect: Allow
-
               Action:
-
                 - cloudwatch:PutMetricData
-
               Resource: "*"
 
-
-      ######################################################
-      # ENVIRONMENT VARIABLES
-      ######################################################
-
       Environment:
-
         Variables:
-
           AWS_REGION_NAME: !Ref AWS::Region
-
           TRANSACTIONS_TABLE: Transactions
-
           FRAUD_RESULTS_TABLE: FraudResults
-
           CUSTOMER_PROFILES_TABLE: CustomerProfiles
 
-
-  ##########################################################
-  # FRAUD RESULTS SYNCHRONIZATION FUNCTION
-  ##########################################################
 
   FraudResultsSyncFunction:
     Type: AWS::Serverless::Function
 
     Properties:
-
       CodeUri: ..
-
       Handler: src/lambda_function/sync_handler.lambda_handler
-
       Runtime: python3.11
-
       Timeout: 60
-
       MemorySize: 256
 
-
-      ######################################################
-      # VPC CONFIGURATION
-      ######################################################
-
       VpcConfig:
-
         SecurityGroupIds:
-
           - sg-028fe4b2505cf5132
-
         SubnetIds:
-
           - subnet-0a08dd16941d5025e
 
-
-      ######################################################
-      # DYNAMODB STREAM EVENT
-      ######################################################
-
       Events:
-
         FraudResultsStream:
-
           Type: DynamoDB
-
           Properties:
-
             Stream: !Ref FraudResultsStreamArn
-
             StartingPosition: LATEST
-
             BatchSize: 10
-
-
-      ######################################################
-      # IAM PERMISSIONS
-      ######################################################
 
       Policies:
 
-        # Allow Lambda to write logs
         - AWSLambdaBasicExecutionRole
 
-
-        # Allow Lambda to read DynamoDB Stream records
         - Statement:
-
             - Effect: Allow
-
               Action:
-
                 - dynamodb:GetRecords
                 - dynamodb:GetShardIterator
                 - dynamodb:DescribeStream
                 - dynamodb:ListStreams
-
               Resource:
-
                 - !Ref FraudResultsStreamArn
 
-
-        # Allow Lambda to access PostgreSQL credentials
         - Statement:
-
             - Effect: Allow
-
               Action:
-
                 - secretsmanager:GetSecretValue
-
               Resource:
-
                 - !Ref DBSecretArn
 
+      Environment:
+        Variables:
+          DB_SECRET_NAME: sentineliq/rds/postgres
+          DB_HOST: sentineliq-postgres.clsq8ogwm7qk.eu-west-1.rds.amazonaws.com
+          DB_PORT: '5432'
+          DB_NAME: fintech_fraud
 
-############################################################
-# OUTPUTS
-############################################################
 
 Outputs:
 
-  ##########################################################
-  # API ENDPOINT
-  ##########################################################
-
   ApiEndpoint:
-
     Description: RuztIQ Fraud Detection API Endpoint
-
     Value:
       !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/score"
 
-
-  ##########################################################
-  # FRAUD DETECTION FUNCTION ARN
-  ##########################################################
-
   FraudDetectionFunctionArn:
-
     Description: RuztIQ Fraud Detection Lambda ARN
-
     Value:
       !GetAtt FraudDetectionFunction.Arn
 
-
-  ##########################################################
-  # FRAUD RESULTS SYNC FUNCTION ARN
-  ##########################################################
-
   FraudResultsSyncFunctionArn:
-
     Description: RuztIQ DynamoDB to PostgreSQL synchronization Lambda ARN
-
     Value:
       !GetAtt FraudResultsSyncFunction.Arn
 
-
-  ##########################################################
-  # EXISTING DYNAMODB TABLES
-  ##########################################################
-
   TransactionsTableName:
-
     Description: Existing RuztIQ Transactions DynamoDB Table
-
     Value: Transactions
 
-
   FraudResultsTableName:
-
     Description: Existing RuztIQ Fraud Results DynamoDB Table
-
     Value: FraudResults
 
-
   CustomerProfilesTableName:
-
     Description: Existing RuztIQ Customer Profiles DynamoDB Table
-
     Value: CustomerProfiles
 
-
-  ##########################################################
-  # DYNAMODB STREAM
-  ##########################################################
-
   FraudResultsStreamArnOutput:
-
     Description: Existing FraudResults DynamoDB Stream ARN
-
     Value:
       !Ref FraudResultsStreamArn

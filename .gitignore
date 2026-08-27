@@ -1,10 +1,11 @@
 # Environment files and secrets
-
 .env
 .env.*
 env.json
 *.pem
-*.key# Python
+*.key
+
+# Python
 __pycache__/
 *.py[cod]
 *.so
@@ -14,12 +15,11 @@ __pycache__/
 .venv/
 venv/
 
-# Environment files
-.env
-env.json
-
 # AWS SAM
 .aws-sam/
+build/
+lambda_build/
+deployment.zip
 
 # macOS
 .DS_Store
@@ -35,7 +35,7 @@ env.json
 .coverage
 htmlcov/
 
-# Python cache
+# Type checking
 .mypy_cache/
 
 # IDE
@@ -43,16 +43,3 @@ htmlcov/
 
 # Local outputs
 response.json
-
-# AWS SAM build/deployment artifacts
-build/
-lambda_build/
-deployment.zip
-
-# SAM local/deployment configuration
-.aws-sam/
-
-# AWS SAM build/deployment artifacts
-build/
-lambda_build/
-deployment.zip

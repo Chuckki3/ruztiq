@@ -1,0 +1,16 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "sentineliq"
+resolve_s3 = true
+s3_prefix = "sentineliq-fraud-detection"
+region = "eu-west-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+
+parameter_overrides = "DBSecretArn=\"arn:aws:secretsmanager:eu-west-1:619240106198:secret:sentineliq/rds/postgres-KjWwNH\" TransactionsTableArn=\"arn:aws:dynamodb:eu-west-1:619240106198:table/Transactions\" FraudResultsTableArn=\"arn:aws:dynamodb:eu-west-1:619240106198:table/FraudResults\" CustomerProfilesTableArn=\"arn:aws:dynamodb:eu-west-1:619240106198:table/CustomerProfiles\" FraudResultsStreamArn=\"arn:aws:dynamodb:eu-west-1:619240106198:table/FraudResults/stream/2026-08-27T13:09:07.113\""
+
+image_repositories = []
+
+[default.global.parameters]
+region = "eu-west-1"
