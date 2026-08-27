@@ -7,58 +7,169 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class DecisionResult:
     decision: str
+    decision_reason: str
     risk_score: int
     risk_level: str
-    reason: str
+    is_fraud: bool
+    velocity_violation: bool
 
 
 class DecisionEngine:
     """
-    Converts RuztIQ's fraud risk score into an
-    authorization decision.
+    Converts RuztIQ fraud and velocity signals into
+    an operational transaction decision.
 
-    Decision policy:
+    Decision hierarchy:
 
-        0-29   -> APPROVE
-        30-59  -> REVIEW
-        60-100 -> DECLINE
+        1. Risk score at or above decline threshold
+            -> DECLINE
 
-    The decision engine does not calculate fraud risk.
-    FraudEngine remains responsible for that.
+        2. Fraud engine explicitly identifies fraud and
+           risk score is at or above review threshold
+            -> DECLINE
+
+        3. Velocity violation
+            -> REVIEW
+
+        4. Risk score at or above review threshold
+            -> REVIEW
+
+        5. Otherwise
+            -> APPROVE
+
+    FraudEngine remains responsible for calculating
+    fraud risk. DecisionEngine is responsible only for
+    authorization policy.
     """
 
-    APPROVE_MAX_SCORE = 29
-    REVIEW_MAX_SCORE = 59
-    DECLINE_MIN_SCORE = 60
+    REVIEW_THRESHOLD = 30
+    DECLINE_THRESHOLD = 60
 
     @classmethod
-    def decide(cls, fraud_result):
-        score = int(fraud_result.risk_score)
+    def decide(cls, fraud_result, velocity_result=None):
+        risk_score = getattr(
+            fraud_result,
+            "risk_score",
+            0,
+        )
 
-        if score <= cls.APPROVE_MAX_SCORE:
-            decision = "APPROVE"
-            reason = "Transaction risk is within the acceptable range."
+        risk_level = getattr(
+            fraud_result,
+            "risk_level",
+            None,
+        )
 
-        elif score <= cls.REVIEW_MAX_SCORE:
+        is_fraud = getattr(
+            fraud_result,
+            "is_fraud",
+            False,
+        )
+
+        try:
+            risk_score = int(risk_score)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid fraud risk score: %s. Using 0.",
+                risk_score,
+            )
+            risk_score = 0
+
+        if isinstance(is_fraud, str):
+            is_fraud = (
+                is_fraud.lower() == "true"
+            )
+
+        if not isinstance(is_fraud, bool):
+            is_fraud = bool(is_fraud)
+
+        velocity_violation = False
+
+        if isinstance(velocity_result, dict):
+            velocity_violation = bool(
+                velocity_result.get(
+                    "is_violation",
+                    False,
+                )
+            )
+
+        # ======================================================
+        # 1. HARD DECLINE
+        # ======================================================
+
+        if risk_score >= cls.DECLINE_THRESHOLD:
+            decision = "DECLINE"
+            reason = (
+                "Risk score exceeds the automatic "
+                "decline threshold."
+            )
+
+        # ======================================================
+        # 2. CONFIRMED FRAUD
+        # ======================================================
+
+        elif (
+            is_fraud
+            and risk_score >= cls.REVIEW_THRESHOLD
+        ):
+            decision = "DECLINE"
+            reason = (
+                "Fraud engine identified the transaction "
+                "as fraudulent."
+            )
+
+        # ======================================================
+        # 3. VELOCITY REVIEW
+        # ======================================================
+
+        elif velocity_violation:
             decision = "REVIEW"
-            reason = "Transaction requires additional fraud review."
+            reason = (
+                "Transaction velocity exceeded the "
+                "configured behavioural threshold."
+            )
+
+        # ======================================================
+        # 4. RISK REVIEW
+        # ======================================================
+
+        elif risk_score >= cls.REVIEW_THRESHOLD:
+            decision = "REVIEW"
+            reason = (
+                "Risk score requires additional review."
+            )
+
+        # ======================================================
+        # 5. APPROVE
+        # ======================================================
 
         else:
-            decision = "DECLINE"
-            reason = "Transaction risk exceeds the authorization threshold."
+            decision = "APPROVE"
+            reason = (
+                "Transaction is below the configured "
+                "review threshold."
+            )
 
         logger.info(
-            "Authorization decision | transaction=%s | "
-            "risk_score=%s | risk_level=%s | decision=%s",
-            fraud_result.transaction_reference,
-            score,
-            fraud_result.risk_level,
+            "Transaction decision | "
+            "Decision=%s | "
+            "RiskScore=%s | "
+            "RiskLevel=%s | "
+            "Fraud=%s | "
+            "VelocityViolation=%s | "
+            "Reason=%s",
             decision,
+            risk_score,
+            risk_level,
+            is_fraud,
+            velocity_violation,
+            reason,
         )
 
         return DecisionResult(
             decision=decision,
-            risk_score=score,
-            risk_level=fraud_result.risk_level,
-            reason=reason,
+            decision_reason=reason,
+            risk_score=risk_score,
+            risk_level=risk_level,
+            is_fraud=is_fraud,
+            velocity_violation=velocity_violation,
         )
