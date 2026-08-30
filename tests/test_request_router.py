@@ -1,3 +1,4 @@
+
 import json
 
 from unittest.mock import MagicMock, patch
@@ -37,7 +38,15 @@ def test_valid_api_request(mock_metrics, mock_pipeline):
     mock_pipeline_instance = mock_pipeline.return_value
 
     mock_pipeline_instance.process_existing_transaction.return_value = {
-        "fraud_result": mock_fraud_result
+        "fraud_result": mock_fraud_result,
+        "decision": {
+            "decision": "APPROVE",
+            "decision_reason": (
+                "Transaction is below the configured "
+                "review threshold."
+            ),
+            "velocity_violation": False,
+        },
     }
 
     router = RequestRouter()
@@ -58,6 +67,17 @@ def test_valid_api_request(mock_metrics, mock_pipeline):
     assert body["is_fraud"] is False
     assert body["reasons"] == []
 
+    assert body["decision"] == "APPROVE"
+
+    assert body["decision_reason"] == (
+        "Transaction is below the configured "
+        "review threshold."
+    )
+
+    assert body["velocity_violation"] is False
+
+    mock_metrics.api_request.assert_called_once()
+
     mock_pipeline_instance.process_existing_transaction.assert_called_once()
 
     transaction = (
@@ -76,6 +96,10 @@ def test_valid_api_request(mock_metrics, mock_pipeline):
     assert transaction.location == "Lagos, Nigeria"
     assert transaction.ip_address == "197.210.70.10"
     assert transaction.status == "APPROVED"
+
+    assert transaction.transaction_time.isoformat() == (
+        "2026-08-27T18:30:00+01:00"
+    )
 
 
 @patch("src.services.request_router.MetricsService")
@@ -173,3 +197,4 @@ def test_invalid_transaction_time_returns_400(mock_metrics):
     assert body["error"] == "Invalid transaction_time"
 
     mock_metrics.validation_error.assert_called_once()
+

@@ -2,8 +2,11 @@ import json
 import logging
 
 from src.models.api_transaction import APITransaction
+
 from src.services.metrics_service import MetricsService
+
 from src.services.pipeline_service import PipelineService
+
 from src.services.validation_service import (
     ValidationService,
     ValidationError,
@@ -47,7 +50,6 @@ class RequestRouter:
             # Validate request
             #
             try:
-
                 self.validator.validate(body)
 
             except ValidationError as e:
@@ -63,28 +65,99 @@ class RequestRouter:
                     ),
                 }
 
+            #
+            # Convert external API transaction
+            # into the internal Transaction model.
+            #
             api_transaction = APITransaction(**body)
 
+            transaction = api_transaction.to_transaction()
+
+            #
+            # Process the transaction through the
+            # complete fraud detection pipeline.
+            #
             result = self.pipeline.process_existing_transaction(
-                api_transaction.to_transaction()
+                transaction
             )
 
+            #
+            # Extract fraud evaluation result.
+            #
             fraud = result["fraud_result"]
 
+            #
+            # Extract operational decision.
+            #
+            # The pipeline may return the decision either
+            # as a dictionary or as a DecisionResult
+            # dataclass/object.
+            #
+            decision_result = result.get("decision")
+
+            if isinstance(decision_result, dict):
+
+                decision = decision_result.get("decision")
+
+                decision_reason = decision_result.get(
+                    "decision_reason"
+                )
+
+                velocity_violation = decision_result.get(
+                    "velocity_violation",
+                    False,
+                )
+
+            else:
+
+                decision = getattr(
+                    decision_result,
+                    "decision",
+                    None,
+                )
+
+                decision_reason = getattr(
+                    decision_result,
+                    "decision_reason",
+                    None,
+                )
+
+                velocity_violation = getattr(
+                    decision_result,
+                    "velocity_violation",
+                    False,
+                )
+
+            #
+            # Return the complete API response.
+            #
             return {
                 "statusCode": 200,
                 "body": json.dumps(
                     {
                         "transaction_reference":
                             fraud.transaction_reference,
+
                         "risk_score":
                             fraud.risk_score,
+
                         "risk_level":
                             fraud.risk_level,
+
                         "is_fraud":
                             fraud.is_fraud,
+
                         "reasons":
                             fraud.reasons,
+
+                        "decision":
+                            decision,
+
+                        "decision_reason":
+                            decision_reason,
+
+                        "velocity_violation":
+                            velocity_violation,
                     }
                 ),
             }
