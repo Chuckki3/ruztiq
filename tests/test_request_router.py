@@ -29,6 +29,7 @@ def valid_payload():
 @patch("src.services.request_router.MetricsService")
 def test_valid_api_request(mock_metrics, mock_pipeline):
     mock_fraud_result = MagicMock()
+
     mock_fraud_result.transaction_reference = "API-TEST123456"
     mock_fraud_result.risk_score = 18.5
     mock_fraud_result.risk_level = "LOW"
@@ -66,14 +67,11 @@ def test_valid_api_request(mock_metrics, mock_pipeline):
     assert body["risk_level"] == "LOW"
     assert body["is_fraud"] is False
     assert body["reasons"] == []
-
     assert body["decision"] == "APPROVE"
-
     assert body["decision_reason"] == (
         "Transaction is below the configured "
         "review threshold."
     )
-
     assert body["velocity_violation"] is False
 
     mock_metrics.api_request.assert_called_once()
@@ -107,6 +105,7 @@ def test_invalid_api_request_returns_400(mock_metrics):
     router = RequestRouter()
 
     payload = valid_payload()
+
     payload["payment_method"] = "INVALID"
 
     event = {
@@ -120,6 +119,7 @@ def test_invalid_api_request_returns_400(mock_metrics):
     body = json.loads(response["body"])
 
     assert "error" in body
+
     assert body["error"] == "Unsupported payment_method"
 
     mock_metrics.validation_error.assert_called_once()
@@ -134,6 +134,7 @@ def test_invalid_ip_address_returns_400(
     router = RequestRouter()
 
     payload = valid_payload()
+
     payload["ip_address"] = "not-an-ip"
 
     event = {
@@ -158,6 +159,7 @@ def test_missing_transaction_reference_returns_400(mock_metrics):
     router = RequestRouter()
 
     payload = valid_payload()
+
     del payload["transaction_reference"]
 
     event = {
@@ -182,6 +184,7 @@ def test_invalid_transaction_time_returns_400(mock_metrics):
     router = RequestRouter()
 
     payload = valid_payload()
+
     payload["transaction_time"] = "not-a-timestamp"
 
     event = {
@@ -195,6 +198,25 @@ def test_invalid_transaction_time_returns_400(mock_metrics):
     body = json.loads(response["body"])
 
     assert body["error"] == "Invalid transaction_time"
+
+    mock_metrics.validation_error.assert_called_once()
+
+
+@patch("src.services.request_router.MetricsService")
+def test_malformed_json_returns_400(mock_metrics):
+    router = RequestRouter()
+
+    event = {
+        "body": "{invalid-json}"
+    }
+
+    response = router.handle(event)
+
+    assert response["statusCode"] == 400
+
+    body = json.loads(response["body"])
+
+    assert body["error"] == "Invalid JSON body"
 
     mock_metrics.validation_error.assert_called_once()
 

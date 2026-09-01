@@ -43,8 +43,28 @@ class RequestRouter:
 
             body = event["body"]
 
+            #
+            # Decode API Gateway JSON body.
+            #
+            # Malformed JSON is a client request error and
+            # should therefore return HTTP 400 rather than
+            # becoming an unhandled Lambda exception.
+            #
             if isinstance(body, str):
-                body = json.loads(body)
+                try:
+                    body = json.loads(body)
+
+                except json.JSONDecodeError:
+                    MetricsService.validation_error()
+
+                    return {
+                        "statusCode": 400,
+                        "body": json.dumps(
+                            {
+                                "error": "Invalid JSON body"
+                            }
+                        ),
+                    }
 
             #
             # Validate request
