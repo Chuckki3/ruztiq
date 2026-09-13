@@ -1,8 +1,11 @@
+
 AWSTemplateFormatVersion: '2010-09-09'
+
 Transform: AWS::Serverless-2016-10-31
 
 Description: >
   RuztIQ serverless fraud detection pipeline.
+
   Exposes a fraud scoring API through API Gateway,
   processes transactions with Lambda and DynamoDB,
   and synchronizes fraud results to PostgreSQL.
@@ -12,6 +15,10 @@ Parameters:
   DBSecretArn:
     Type: String
     Description: ARN of the PostgreSQL database secret in AWS Secrets Manager
+
+  ApiAuthSecretArn:
+    Type: String
+    Description: ARN of the RuztIQ API authentication secret in AWS Secrets Manager
 
   TransactionsTableArn:
     Type: String
@@ -30,11 +37,48 @@ Parameters:
     Description: ARN of the existing FraudResults DynamoDB Stream
 
 
+Globals:
+
+  Api:
+    Auth:
+      Authorizers:
+        RuztIQApiAuthorizer:
+          FunctionPayloadType: REQUEST
+          FunctionArn: !GetAtt RuztIQApiAuthorizerFunction.Arn
+          Identity:
+            Headers:
+              - Authorization
+
+
 Resources:
+
+  RuztIQApiAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ..
+      Handler: src/lambda_function/authorizer.lambda_handler
+      Runtime: python3.11
+      Timeout: 10
+      MemorySize: 128
+
+      Policies:
+        - AWSLambdaBasicExecutionRole
+
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource:
+                - !Ref ApiAuthSecretArn
+
+      Environment:
+        Variables:
+          AWS_REGION_NAME: !Ref AWS::Region
+          API_AUTH_SECRET_NAME: sentineliq/api/auth
+
 
   FraudDetectionFunction:
     Type: AWS::Serverless::Function
-
     Properties:
       CodeUri: ..
       Handler: src/lambda_function/handler.lambda_handler
@@ -48,9 +92,10 @@ Resources:
           Properties:
             Path: /score
             Method: post
+            Auth:
+              Authorizer: RuztIQApiAuthorizer
 
       Policies:
-
         - AWSLambdaBasicExecutionRole
 
         - Statement:
@@ -83,7 +128,6 @@ Resources:
 
   FraudResultsSyncFunction:
     Type: AWS::Serverless::Function
-
     Properties:
       CodeUri: ..
       Handler: src/lambda_function/sync_handler.lambda_handler
@@ -106,7 +150,6 @@ Resources:
             BatchSize: 10
 
       Policies:
-
         - AWSLambdaBasicExecutionRole
 
         - Statement:
@@ -150,6 +193,11 @@ Outputs:
     Description: RuztIQ DynamoDB to PostgreSQL synchronization Lambda ARN
     Value:
       !GetAtt FraudResultsSyncFunction.Arn
+
+  RuztIQApiAuthorizerFunctionArn:
+    Description: RuztIQ API Lambda authorizer ARN
+    Value:
+      !GetAtt RuztIQApiAuthorizerFunction.Arn
 
   TransactionsTableName:
     Description: Existing RuztIQ Transactions DynamoDB Table
