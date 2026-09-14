@@ -6,17 +6,21 @@ from src.services.pipeline_service import PipelineService
 
 def make_transaction():
     transaction = MagicMock()
-
     transaction.transaction_reference = "TX-TEST-001"
     transaction.customer_id = 1001
-    transaction.transaction_time = datetime(2026, 8, 5, 12, 0, 0)
-
+    transaction.transaction_time = datetime(
+        2026,
+        8,
+        5,
+        12,
+        0,
+        0,
+    )
     return transaction
 
 
 def make_fraud_result():
     fraud_result = MagicMock()
-
     fraud_result.transaction_reference = "TX-TEST-001"
     fraud_result.risk_score = 82.5
     fraud_result.risk_level = "HIGH"
@@ -25,7 +29,6 @@ def make_fraud_result():
         "New device detected",
         "High transaction velocity",
     ]
-
     return fraud_result
 
 
@@ -53,15 +56,19 @@ def test_pipeline_processes_transaction_in_correct_order(
     }
 
     #
-    # Mock customer profile
+    # Mock customer state
     #
 
-    pipeline.profile_service.repository.get_or_create = (
-        MagicMock(return_value=profile)
+    pipeline.fraud_state_service.get_customer_profile = (
+        MagicMock(
+            return_value=profile
+        )
     )
 
-    pipeline.profile_service.learn = MagicMock(
-        return_value=updated_profile
+    pipeline.fraud_state_service.learn_from_transaction = (
+        MagicMock(
+            return_value=updated_profile
+        )
     )
 
     #
@@ -73,7 +80,7 @@ def test_pipeline_processes_transaction_in_correct_order(
         MagicMock(),
     ]
 
-    pipeline.transaction_repository.get_recent_transactions = (
+    pipeline.fraud_state_service.get_recent_transactions = (
         MagicMock(
             return_value=historical_transactions
         )
@@ -96,12 +103,16 @@ def test_pipeline_processes_transaction_in_correct_order(
     )
 
     #
-    # Mock repositories
+    # Mock fraud-result persistence
     #
 
     pipeline.fraud_repository.insert_result = MagicMock()
 
-    pipeline.transaction_repository.insert_transaction = (
+    #
+    # Mock transaction persistence
+    #
+
+    pipeline.fraud_state_service.persist_transaction = (
         MagicMock()
     )
 
@@ -126,18 +137,26 @@ def test_pipeline_processes_transaction_in_correct_order(
     # Verify profile was loaded
     #
 
-    pipeline.profile_service.repository.get_or_create.assert_called_once_with(
-        1001
+    (
+        pipeline
+        .fraud_state_service
+        .get_customer_profile
+        .assert_called_once_with(1001)
     )
 
     #
     # Verify historical transactions were retrieved
     #
 
-    pipeline.transaction_repository.get_recent_transactions.assert_called_once_with(
-        customer_id=1001,
-        transaction_time=transaction.transaction_time,
-        window_minutes=5,
+    (
+        pipeline
+        .fraud_state_service
+        .get_recent_transactions
+        .assert_called_once_with(
+            customer_id=1001,
+            transaction_time=transaction.transaction_time,
+            window_minutes=5,
+        )
     )
 
     #
@@ -163,24 +182,39 @@ def test_pipeline_processes_transaction_in_correct_order(
     # Verify fraud result was persisted
     #
 
-    pipeline.fraud_repository.insert_result.assert_called_once_with(
-        fraud_result
+    (
+        pipeline
+        .fraud_repository
+        .insert_result
+        .assert_called_once_with(
+            fraud_result
+        )
     )
 
     #
     # Verify current transaction was learned
     #
 
-    pipeline.profile_service.learn.assert_called_once_with(
-        transaction
+    (
+        pipeline
+        .fraud_state_service
+        .learn_from_transaction
+        .assert_called_once_with(
+            transaction
+        )
     )
 
     #
     # Verify transaction was persisted
     #
 
-    pipeline.transaction_repository.insert_transaction.assert_called_once_with(
-        transaction
+    (
+        pipeline
+        .fraud_state_service
+        .persist_transaction
+        .assert_called_once_with(
+            transaction
+        )
     )
 
     #
@@ -213,21 +247,22 @@ def test_pipeline_does_not_learn_transaction_before_fraud_evaluation(
     fraud_result = make_fraud_result()
 
     profile = MagicMock()
+
     velocity_result = {
         "is_violation": False,
         "recent_transactions": 2,
     }
 
-    pipeline.profile_service.repository.get_or_create = (
-        MagicMock(return_value=profile)
+    pipeline.fraud_state_service.get_customer_profile = (
+        MagicMock(
+            return_value=profile
+        )
     )
 
-    pipeline.profile_service.learn = MagicMock(
-        return_value=profile
-    )
-
-    pipeline.transaction_repository.get_recent_transactions = (
-        MagicMock(return_value=[])
+    pipeline.fraud_state_service.get_recent_transactions = (
+        MagicMock(
+            return_value=[]
+        )
     )
 
     pipeline.velocity_engine.score = MagicMock(
@@ -236,11 +271,17 @@ def test_pipeline_does_not_learn_transaction_before_fraud_evaluation(
 
     call_order = []
 
-    def fraud_evaluate(*args, **kwargs):
+    def fraud_evaluate(
+        *args,
+        **kwargs,
+    ):
         call_order.append("fraud")
         return fraud_result
 
-    def profile_learn(*args, **kwargs):
+    def state_learn(
+        *args,
+        **kwargs,
+    ):
         call_order.append("learn")
         return profile
 
@@ -248,13 +289,15 @@ def test_pipeline_does_not_learn_transaction_before_fraud_evaluation(
         side_effect=fraud_evaluate
     )
 
-    pipeline.profile_service.learn = MagicMock(
-        side_effect=profile_learn
+    pipeline.fraud_state_service.learn_from_transaction = (
+        MagicMock(
+            side_effect=state_learn
+        )
     )
 
     pipeline.fraud_repository.insert_result = MagicMock()
 
-    pipeline.transaction_repository.insert_transaction = (
+    pipeline.fraud_state_service.persist_transaction = (
         MagicMock()
     )
 
@@ -281,15 +324,18 @@ def test_pipeline_does_not_count_current_transaction_in_history(
 
     transaction = make_transaction()
     fraud_result = make_fraud_result()
-
     profile = MagicMock()
 
-    pipeline.profile_service.repository.get_or_create = (
-        MagicMock(return_value=profile)
+    pipeline.fraud_state_service.get_customer_profile = (
+        MagicMock(
+            return_value=profile
+        )
     )
 
-    pipeline.profile_service.learn = MagicMock(
-        return_value=profile
+    pipeline.fraud_state_service.learn_from_transaction = (
+        MagicMock(
+            return_value=profile
+        )
     )
 
     historical_transactions = [
@@ -298,7 +344,7 @@ def test_pipeline_does_not_count_current_transaction_in_history(
         MagicMock(),
     ]
 
-    pipeline.transaction_repository.get_recent_transactions = (
+    pipeline.fraud_state_service.get_recent_transactions = (
         MagicMock(
             return_value=historical_transactions
         )
@@ -317,20 +363,26 @@ def test_pipeline_does_not_count_current_transaction_in_history(
 
     call_order = []
 
-    def get_history(*args, **kwargs):
+    def get_history(
+        *args,
+        **kwargs,
+    ):
         call_order.append("history")
         return historical_transactions
 
-    def insert_transaction(*args, **kwargs):
+    def insert_transaction(
+        *args,
+        **kwargs,
+    ):
         call_order.append("transaction_insert")
 
-    pipeline.transaction_repository.get_recent_transactions = (
+    pipeline.fraud_state_service.get_recent_transactions = (
         MagicMock(
             side_effect=get_history
         )
     )
 
-    pipeline.transaction_repository.insert_transaction = (
+    pipeline.fraud_state_service.persist_transaction = (
         MagicMock(
             side_effect=insert_transaction
         )

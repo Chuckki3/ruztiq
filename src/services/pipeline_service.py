@@ -3,12 +3,7 @@ import logging
 from src.fraud.fraud_engine import FraudEngine
 from src.decision.decision_engine import DecisionEngine
 from src.repositories.fraud_repository import FraudRepository
-from src.repositories.transaction_repository import (
-    TransactionRepository,
-)
-from src.profiles.customer_profile_service import (
-    CustomerProfileService,
-)
+from src.services.fraud_state_service import FraudStateService
 from src.services.metrics_service import MetricsService
 from src.behaviour.velocity_engine import VelocityEngine
 
@@ -19,6 +14,12 @@ logger = logging.getLogger(__name__)
 class PipelineService:
     """
     Coordinates the RuztIQ fraud detection pipeline.
+
+    PipelineService owns orchestration.
+
+    It does not directly access the underlying customer-state
+    persistence repositories. Operational state is provided through
+    FraudStateService.
 
     Production processing order:
 
@@ -65,17 +66,27 @@ class PipelineService:
     method as already trusted.
     """
 
-    def __init__(self):
-        self.transaction_repository = (
-            TransactionRepository()
+    def __init__(
+        self,
+        fraud_state_service=None,
+        fraud_repository=None,
+    ):
+        """
+        Initialise the fraud decision pipeline.
+
+        Dependencies are injectable so orchestration can be tested
+        independently of the persistence implementation.
+        """
+        self.fraud_state_service = (
+            fraud_state_service
+            if fraud_state_service is not None
+            else FraudStateService()
         )
 
         self.fraud_repository = (
-            FraudRepository()
-        )
-
-        self.profile_service = (
-            CustomerProfileService()
+            fraud_repository
+            if fraud_repository is not None
+            else FraudRepository()
         )
 
         self.fraud_engine = FraudEngine()
@@ -109,7 +120,6 @@ class PipelineService:
         PipelineService coordinates the workflow.
         DecisionEngine owns the authorization policy.
         """
-
         decision_result = self.decision_engine.decide(
             fraud_result=fraud_result,
             velocity_result=velocity_result,
@@ -133,8 +143,8 @@ class PipelineService:
         transaction,
     ):
         """
-        Process a transaction supplied by an external source
-        such as:
+        Process a transaction supplied by an external source such
+        as:
 
         - API Gateway
         - fintech transaction API
@@ -142,8 +152,8 @@ class PipelineService:
         - SQS
         - internal service
 
-        The method returns the complete RuztIQ decision
-        package while preserving the existing persistence and
+        The method returns the complete RuztIQ decision package
+        while preserving the existing persistence and
         customer-learning behaviour.
         """
 
@@ -169,7 +179,7 @@ class PipelineService:
         #
 
         profile = (
-            self.profile_service.repository.get_or_create(
+            self.fraud_state_service.get_customer_profile(
                 transaction.customer_id
             )
         )
@@ -186,8 +196,7 @@ class PipelineService:
         #
 
         transaction_history = (
-            self.transaction_repository
-            .get_recent_transactions(
+            self.fraud_state_service.get_recent_transactions(
                 customer_id=transaction.customer_id,
                 transaction_time=(
                     transaction.transaction_time
@@ -243,8 +252,6 @@ class PipelineService:
         # ======================================================
 
         #
-        # This is the new layer.
-        #
         # FraudEngine determines risk.
         # PipelineService converts that risk into an action
         # the fintech can use immediately.
@@ -262,6 +269,7 @@ class PipelineService:
         #
         # Preserve the existing fraud repository behaviour.
         #
+
         self.fraud_repository.insert_result(
             fraud_result
         )
@@ -279,7 +287,7 @@ class PipelineService:
         #
 
         updated_profile = (
-            self.profile_service.learn(
+            self.fraud_state_service.learn_from_transaction(
                 transaction
             )
         )
@@ -296,7 +304,7 @@ class PipelineService:
         # previous activity.
         #
 
-        self.transaction_repository.insert_transaction(
+        self.fraud_state_service.persist_transaction(
             transaction
         )
 
@@ -377,16 +385,14 @@ class PipelineService:
         # ======================================================
 
         #
-        # IMPORTANT:
+        # Existing return values are preserved.
         #
-        # The existing return values are preserved.
+        # The decision remains available alongside:
         #
-        # We are only adding:
-        #
-        #     "decision"
-        #
-        # This means existing callers that use transaction,
-        # profile, velocity or fraud_result continue to work.
+        #   transaction
+        #   profile
+        #   velocity
+        #   fraud_result
         #
 
         return {
@@ -402,7 +408,7 @@ class PipelineService:
             # Original fraud-engine result.
             "fraud_result": fraud_result,
 
-            # New operational authorization decision.
+            # Operational authorization decision.
             "decision": decision,
         }
 
@@ -411,6 +417,7 @@ class PipelineService:
     # ==========================================================
 
     def process_generated_transaction(self):
+
         """
         Generate and process a synthetic transaction.
 
@@ -418,7 +425,7 @@ class PipelineService:
         """
 
         customer_id = (
-            self.transaction_repository
+            self.fraud_state_service
             .get_random_customer_id()
         )
 
@@ -455,7 +462,9 @@ class PipelineService:
         processed = 0
 
         for _ in range(batch_size):
+
             try:
+
                 result = (
                     self.process_generated_transaction()
                 )
@@ -464,6 +473,7 @@ class PipelineService:
                     processed += 1
 
             except Exception:
+
                 logger.exception(
                     "Failed to process generated transaction."
                 )
