@@ -14,14 +14,21 @@ class FraudStateService:
     decision pipeline and the underlying storage implementation.
 
     The fraud engines do not know where customer state comes from.
+
     PipelineService should interact with this service instead of
-    reaching directly into DynamoDB-backed repositories.
+    reaching directly into persistence implementations.
 
     Current implementation:
 
         FraudStateService
                 ↓
-        DynamoDB-backed repositories
+        CustomerProfileService
+                ↓
+        CustomerProfileRepository
+
+        FraudStateService
+                ↓
+        TransactionRepository
 
     Future implementations may use another operational state store
     without requiring changes to FraudEngine, VelocityEngine or
@@ -62,10 +69,11 @@ class FraudStateService:
         """
         Retrieve an existing customer profile or create one.
 
-        The profile represents behavioural state accumulated
-        from transactions processed before the current transaction.
+        CustomerProfileService owns the customer-profile persistence
+        boundary. FraudStateService therefore does not access the
+        underlying repository directly.
         """
-        return self.profile_service.repository.get_or_create(
+        return self.profile_service.get_or_create(
             customer_id
         )
 

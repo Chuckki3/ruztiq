@@ -12,7 +12,6 @@ class CustomerProfileService:
     that may indicate fraud.
 
     The service is responsible for:
-
     - Building customer transaction history
     - Tracking spending behaviour
     - Tracking known devices
@@ -40,8 +39,33 @@ class CustomerProfileService:
     # Failed transaction threshold.
     DEFAULT_FAILED_ATTEMPT_THRESHOLD = 5
 
-    def __init__(self):
-        self.repository = CustomerProfileRepository()
+    def __init__(self, repository=None):
+        """
+        Initialise the customer profile service.
+
+        The repository is injectable so the service can be tested
+        independently and the underlying persistence implementation
+        can be replaced in the future.
+        """
+        self.repository = (
+            repository
+            if repository is not None
+            else CustomerProfileRepository()
+        )
+
+    # ==========================================================
+    # PROFILE RETRIEVAL
+    # ==========================================================
+
+    def get_or_create(self, customer_id):
+        """
+        Retrieve an existing customer profile or create one.
+
+        Persistence remains behind the customer profile service
+        boundary so callers do not need to access the repository
+        directly.
+        """
+        return self.repository.get_or_create(customer_id)
 
     # ==========================================================
     # PROFILE LEARNING
@@ -56,7 +80,7 @@ class CustomerProfileService:
         processes more transactions for the customer.
         """
 
-        profile = self.repository.get_or_create(
+        profile = self.get_or_create(
             transaction.customer_id
         )
 
@@ -232,7 +256,6 @@ class CustomerProfileService:
         Returns True when the customer has never used this
         device before.
         """
-
         return (
             transaction.device_type
             not in profile.known_devices
@@ -247,7 +270,6 @@ class CustomerProfileService:
         Returns True when the transaction originates from a
         location never previously associated with the customer.
         """
-
         return (
             transaction.location
             not in profile.known_locations
@@ -262,7 +284,6 @@ class CustomerProfileService:
         Returns True when the IP address has never previously
         been associated with the customer.
         """
-
         return (
             transaction.ip_address
             not in profile.known_ips
@@ -277,7 +298,6 @@ class CustomerProfileService:
         Returns True when the customer has never previously
         transacted with this merchant.
         """
-
         return (
             transaction.merchant_name
             not in profile.known_merchants
@@ -292,7 +312,6 @@ class CustomerProfileService:
         Returns True when the customer is using a payment
         method not previously observed in their profile.
         """
-
         return (
             transaction.payment_method
             not in profile.known_payment_methods
@@ -315,7 +334,6 @@ class CustomerProfileService:
         Amount anomaly detection only activates after the
         customer has sufficient transaction history.
         """
-
         if (
             profile.total_transactions
             < self.MIN_TRANSACTIONS_FOR_AMOUNT_ANOMALY
@@ -343,7 +361,6 @@ class CustomerProfileService:
         Returns True when the customer has accumulated an
         unusual number of failed transactions.
         """
-
         return (
             profile.failed_transactions
             >= threshold
@@ -365,7 +382,6 @@ class CustomerProfileService:
         Returns a structured dictionary that can be consumed
         directly by FraudEngine.
         """
-
         return {
             "new_device": self.is_new_device(
                 profile,
@@ -413,14 +429,12 @@ class CustomerProfileService:
         behavioural profile.
 
         Useful for:
-
         - Fraud explanations
         - API responses
         - Debugging
         - Dashboards
         - Future customer-risk modelling
         """
-
         return {
             "customer_id": profile.customer_id,
             "total_transactions": (
