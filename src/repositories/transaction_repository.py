@@ -15,37 +15,28 @@ class TransactionRepository:
         """
         Persist a transaction to DynamoDB.
         """
-
         item = transaction.to_dict()
-
         if "amount" in item:
             item["amount"] = Decimal(str(item["amount"]))
-
         if isinstance(item.get("transaction_time"), datetime):
             item["transaction_time"] = item["transaction_time"].isoformat()
-
         TRANSACTIONS_TABLE.put_item(Item=item)
-
         return item["transaction_reference"]
 
     def count_transactions(self):
         """
         Return the total number of transactions.
-
         Uses Scan for development and operational statistics.
         """
-
         response = TRANSACTIONS_TABLE.scan(
             Select="COUNT"
         )
-
         return response["Count"]
 
     def get_random_customer_id(self):
         """
         Temporary synthetic-data helper.
         """
-
         return 1
 
     def get_recent_transactions(
@@ -57,10 +48,10 @@ class TransactionRepository:
         """
         Retrieve historical transactions for a customer
         within the configured velocity window.
-
-        Uses the customer_id + transaction_time GSI.
+        Uses the customer_id + transaction_time GSI
+        and follows DynamoDB pagination until all matching
+        records have been retrieved.
         """
-
         if transaction_time.tzinfo is None:
             transaction_time = transaction_time.replace(
                 tzinfo=UTC
@@ -71,21 +62,41 @@ class TransactionRepository:
             - timedelta(minutes=window_minutes)
         )
 
-        response = TRANSACTIONS_TABLE.query(
-            IndexName="customer_id-transaction_time-index",
-            KeyConditionExpression=(
+        query_kwargs = {
+            "IndexName": "customer_id-transaction_time-index",
+            "KeyConditionExpression": (
                 "customer_id = :customer_id "
                 "AND transaction_time BETWEEN :start_time "
                 "AND :end_time"
             ),
-            ExpressionAttributeValues={
+            "ExpressionAttributeValues": {
                 ":customer_id": customer_id,
                 ":start_time": window_start.isoformat(),
                 ":end_time": transaction_time.isoformat(),
             },
-        )
+        }
 
-        items = response.get("Items", [])
+        items = []
+
+        while True:
+            response = TRANSACTIONS_TABLE.query(
+                **query_kwargs
+            )
+
+            items.extend(
+                response.get("Items", [])
+            )
+
+            last_evaluated_key = response.get(
+                "LastEvaluatedKey"
+            )
+
+            if not last_evaluated_key:
+                break
+
+            query_kwargs["ExclusiveStartKey"] = (
+                last_evaluated_key
+            )
 
         transactions = []
 
@@ -165,7 +176,6 @@ class TransactionRepository:
                         )
                     ),
                 )
-
             except (
                 KeyError,
                 TypeError,
