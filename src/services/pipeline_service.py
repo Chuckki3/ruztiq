@@ -1,12 +1,11 @@
 import logging
 
-from src.fraud.fraud_engine import FraudEngine
+from src.behaviour.velocity_engine import VelocityEngine
 from src.decision.decision_engine import DecisionEngine
+from src.fraud.fraud_engine import FraudEngine
 from src.repositories.fraud_repository import FraudRepository
 from src.services.fraud_state_service import FraudStateService
 from src.services.metrics_service import MetricsService
-from src.behaviour.velocity_engine import VelocityEngine
-
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +24,8 @@ class PipelineService:
 
         Incoming Transaction
                 ↓
+        Idempotency Check
+                ↓
         Load Existing Customer Profile
                 ↓
         Retrieve Historical Transactions
@@ -35,7 +36,7 @@ class PipelineService:
                 ↓
         Transaction Decision
                 ↓
-        Persist Fraud Result
+        Atomic Fraud Result Persistence
                 ↓
         Learn / Update Customer Profile
                 ↓
@@ -45,25 +46,12 @@ class PipelineService:
                 ↓
         Return Decision
 
-    Decision outcomes:
-
-        APPROVE
-            Transaction can proceed automatically.
-
-        REVIEW
-            Transaction should be held for additional review.
-
-        DECLINE
-            Transaction should be rejected automatically.
-
-    IMPORTANT:
-
     The customer's profile is evaluated BEFORE the current
     transaction is learned.
 
-    This prevents RuztIQ from accidentally treating a
-    suspicious new device, merchant, IP, location, or payment
-    method as already trusted.
+    Duplicate transaction references return the previously
+    persisted result and do not repeat customer learning or
+    transaction persistence.
     """
 
     def __init__(
@@ -131,7 +119,42 @@ class PipelineService:
             "risk_score": decision_result.risk_score,
             "risk_level": decision_result.risk_level,
             "is_fraud": decision_result.is_fraud,
-            "velocity_violation": decision_result.velocity_violation,
+            "velocity_violation": (
+                decision_result.velocity_violation
+            ),
+        }
+
+    # ==========================================================
+    # DUPLICATE RESULT
+    # ==========================================================
+
+    def _return_existing_result(
+        self,
+        transaction,
+        existing_result,
+    ):
+        """
+        Return an already-persisted transaction result.
+
+        Duplicate requests must not mutate customer state or
+        persist the transaction again.
+        """
+        fraud_result = existing_result["fraud_result"]
+        decision = existing_result["decision"]
+
+        logger.info(
+            "Returning existing transaction result | "
+            "Reference=%s | Decision=%s",
+            transaction.transaction_reference,
+            decision["decision"],
+        )
+
+        return {
+            "transaction": transaction,
+            "profile": None,
+            "velocity": None,
+            "fraud_result": fraud_result,
+            "decision": decision,
         }
 
     # ==========================================================
@@ -144,39 +167,43 @@ class PipelineService:
     ):
         """
         Process a transaction supplied by an external source such
-        as:
+        as API Gateway, a fintech transaction API, EventBridge,
+        SQS, or an internal service.
 
-        - API Gateway
-        - fintech transaction API
-        - EventBridge
-        - SQS
-        - internal service
+        Transaction references act as the idempotency key.
 
-        The method returns the complete RuztIQ decision package
-        while preserving the existing persistence and
-        customer-learning behaviour.
+        A previously processed transaction returns its original
+        fraud result and decision without repeating customer
+        learning or transaction persistence.
         """
+        transaction_reference = (
+            transaction.transaction_reference
+        )
 
         logger.info(
             "Starting transaction processing | "
             "Reference=%s | Customer=%s",
-            transaction.transaction_reference,
+            transaction_reference,
             transaction.customer_id,
         )
 
         # ======================================================
-        # 1. LOAD EXISTING CUSTOMER PROFILE
+        # 1. IDEMPOTENCY CHECK
         # ======================================================
 
-        #
-        # IMPORTANT:
-        #
-        # Do this BEFORE learning the current transaction.
-        #
-        # The fraud engine must see the customer's historical
-        # behaviour, not a profile that already contains the
-        # transaction being evaluated.
-        #
+        existing_result = self.fraud_repository.get_result(
+            transaction_reference
+        )
+
+        if existing_result is not None:
+            return self._return_existing_result(
+                transaction,
+                existing_result,
+            )
+
+        # ======================================================
+        # 2. LOAD EXISTING CUSTOMER PROFILE
+        # ======================================================
 
         profile = (
             self.fraud_state_service.get_customer_profile(
@@ -185,15 +212,8 @@ class PipelineService:
         )
 
         # ======================================================
-        # 2. RETRIEVE RECENT TRANSACTION HISTORY
+        # 3. RETRIEVE RECENT TRANSACTION HISTORY
         # ======================================================
-
-        #
-        # The current transaction has NOT been inserted yet.
-        #
-        # Therefore this history represents genuine historical
-        # activity.
-        #
 
         transaction_history = (
             self.fraud_state_service.get_recent_transactions(
@@ -208,54 +228,29 @@ class PipelineService:
         )
 
         # ======================================================
-        # 3. VELOCITY ANALYSIS
+        # 4. VELOCITY ANALYSIS
         # ======================================================
 
-        velocity_result = (
-            self.velocity_engine.score(
-                transaction_time=(
-                    transaction.transaction_time
-                ),
-                transaction_history=(
-                    transaction_history
-                ),
-            )
+        velocity_result = self.velocity_engine.score(
+            transaction_time=(
+                transaction.transaction_time
+            ),
+            transaction_history=transaction_history,
         )
 
         # ======================================================
-        # 4. FRAUD / BEHAVIOURAL ANALYSIS
+        # 5. FRAUD / BEHAVIOURAL ANALYSIS
         # ======================================================
 
-        #
-        # FraudEngine receives:
-        #
-        #   transaction
-        #   existing customer profile
-        #   velocity result
-        #
-        # The current transaction has not contaminated the
-        # customer's behavioural baseline.
-        #
-
-        fraud_result = (
-            self.fraud_engine.evaluate(
-                transaction,
-                profile,
-                velocity_result=(
-                    velocity_result
-                ),
-            )
+        fraud_result = self.fraud_engine.evaluate(
+            transaction,
+            profile,
+            velocity_result=velocity_result,
         )
 
         # ======================================================
-        # 5. OPERATIONAL TRANSACTION DECISION
+        # 6. OPERATIONAL TRANSACTION DECISION
         # ======================================================
-
-        #
-        # FraudEngine determines risk.
-        # PipelineService converts that risk into an action
-        # the fintech can use immediately.
-        #
 
         decision = self.determine_decision(
             fraud_result=fraud_result,
@@ -263,28 +258,42 @@ class PipelineService:
         )
 
         # ======================================================
-        # 6. PERSIST FRAUD RESULT
+        # 7. ATOMIC FRAUD RESULT PERSISTENCE
         # ======================================================
 
-        #
-        # Preserve the existing fraud repository behaviour.
-        #
-
-        self.fraud_repository.insert_result(
-            fraud_result
+        stored = (
+            self.fraud_repository.insert_result_if_absent(
+                result=fraud_result,
+                decision=decision,
+            )
         )
 
         # ======================================================
-        # 7. LEARN FROM CURRENT TRANSACTION
+        # 8. CONCURRENT DUPLICATE
         # ======================================================
 
-        #
-        # ONLY AFTER the fraud decision has been made do we
-        # update the customer's behavioural profile.
-        #
-        # This transaction now becomes part of the customer's
-        # future behavioural history.
-        #
+        if not stored:
+            existing_result = (
+                self.fraud_repository.get_result(
+                    transaction_reference
+                )
+            )
+
+            if existing_result is None:
+                raise RuntimeError(
+                    "Fraud result disappeared after "
+                    "conditional write conflict: "
+                    f"{transaction_reference}"
+                )
+
+            return self._return_existing_result(
+                transaction,
+                existing_result,
+            )
+
+        # ======================================================
+        # 9. LEARN FROM CURRENT TRANSACTION
+        # ======================================================
 
         updated_profile = (
             self.fraud_state_service.learn_from_transaction(
@@ -293,23 +302,15 @@ class PipelineService:
         )
 
         # ======================================================
-        # 8. PERSIST TRANSACTION
+        # 10. PERSIST TRANSACTION
         # ======================================================
-
-        #
-        # Store the transaction after evaluation.
-        #
-        # This keeps the historical lookup above clean and
-        # prevents the current transaction from counting as
-        # previous activity.
-        #
 
         self.fraud_state_service.persist_transaction(
             transaction
         )
 
         # ======================================================
-        # 9. CLOUDWATCH METRICS
+        # 11. CLOUDWATCH METRICS
         # ======================================================
 
         MetricsService.transaction_processed()
@@ -322,14 +323,8 @@ class PipelineService:
             MetricsService.fraud_detected()
 
         # ======================================================
-        # 10. DECISION METRICS
+        # 12. DECISION METRICS
         # ======================================================
-
-        #
-        # Only call optional MetricsService methods if they
-        # already exist. This prevents the pipeline from breaking
-        # if the current MetricsService has not yet been upgraded.
-        #
 
         if hasattr(
             MetricsService,
@@ -353,7 +348,7 @@ class PipelineService:
                 MetricsService.transaction_declined()
 
         # ======================================================
-        # 11. LOGGING
+        # 13. LOGGING
         # ======================================================
 
         logger.info(
@@ -381,34 +376,14 @@ class PipelineService:
         )
 
         # ======================================================
-        # 12. RETURN COMPLETE PIPELINE RESULT
+        # 14. RETURN COMPLETE PIPELINE RESULT
         # ======================================================
-
-        #
-        # Existing return values are preserved.
-        #
-        # The decision remains available alongside:
-        #
-        #   transaction
-        #   profile
-        #   velocity
-        #   fraud_result
-        #
 
         return {
             "transaction": transaction,
-
-            # Current behavioural state AFTER learning.
             "profile": updated_profile,
-
-            # Recent behavioural activity observed BEFORE
-            # evaluating the transaction.
             "velocity": velocity_result,
-
-            # Original fraud-engine result.
             "fraud_result": fraud_result,
-
-            # Operational authorization decision.
             "decision": decision,
         }
 
@@ -417,13 +392,11 @@ class PipelineService:
     # ==========================================================
 
     def process_generated_transaction(self):
-
         """
         Generate and process a synthetic transaction.
 
         Used for development, testing and demonstration.
         """
-
         customer_id = (
             self.fraud_state_service
             .get_random_customer_id()
@@ -433,10 +406,8 @@ class PipelineService:
             customer_id
         )
 
-        return (
-            self.process_existing_transaction(
-                transaction
-            )
+        return self.process_existing_transaction(
+            transaction
         )
 
     # ==========================================================
@@ -453,7 +424,6 @@ class PipelineService:
         Returns the number of successfully processed
         transactions.
         """
-
         logger.info(
             "Processing %s transactions...",
             batch_size,
@@ -462,9 +432,7 @@ class PipelineService:
         processed = 0
 
         for _ in range(batch_size):
-
             try:
-
                 result = (
                     self.process_generated_transaction()
                 )
@@ -473,7 +441,6 @@ class PipelineService:
                     processed += 1
 
             except Exception:
-
                 logger.exception(
                     "Failed to process generated transaction."
                 )
