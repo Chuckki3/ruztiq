@@ -96,7 +96,7 @@ def test_valid_api_request(mock_metrics, mock_pipeline):
     assert transaction.status == "APPROVED"
 
     assert transaction.transaction_time.isoformat() == (
-        "2026-08-27T18:30:00+01:00"
+        "2026-08-27T17:30:00+00:00"
     )
 
 

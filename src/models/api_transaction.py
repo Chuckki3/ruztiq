@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+
 from datetime import datetime, timezone
 
 from src.models.transaction import Transaction
@@ -34,8 +35,10 @@ class APITransaction:
     def to_transaction(self) -> Transaction:
         """
         Convert the API transaction into the internal Transaction model.
-        """
 
+        Transaction timestamps are normalized to UTC so that the
+        internal transaction model has one canonical time representation.
+        """
         if self.transaction_time:
             transaction_time = datetime.fromisoformat(
                 self.transaction_time
@@ -44,6 +47,10 @@ class APITransaction:
             if transaction_time.tzinfo is None:
                 transaction_time = transaction_time.replace(
                     tzinfo=timezone.utc
+                )
+            else:
+                transaction_time = transaction_time.astimezone(
+                    timezone.utc
                 )
         else:
             transaction_time = datetime.now(timezone.utc)
