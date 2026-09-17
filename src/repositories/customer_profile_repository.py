@@ -1,178 +1,210 @@
+import json
+import logging
+import os
 from datetime import datetime
-from decimal import Decimal
+
+import boto3
+import psycopg2
+from psycopg2.extras import Json
 
 from src.models.customer_profile import CustomerProfile
-from src.services.dynamodb import CUSTOMER_PROFILES_TABLE
+
+
+logger = logging.getLogger(__name__)
 
 
 class CustomerProfileRepository:
     """
-    Handles persistence of customer behavioural profiles
-    in DynamoDB.
+    PostgreSQL persistence boundary for customer behavioural profiles.
+
+    The repository translates between the CustomerProfile domain model
+    and the PostgreSQL `customers` table.
+
+    PostgreSQL is the operational source of truth for customer profiles.
     """
 
+    JSON_FIELDS = (
+        "known_devices",
+        "known_locations",
+        "known_payment_methods",
+        "known_merchants",
+        "known_ips",
+        "recent_transactions",
+    )
+
+    def __init__(
+        self,
+        secret_name=None,
+        db_host=None,
+        db_port=None,
+        db_name=None,
+        secrets_client=None,
+    ):
+        self.secret_name = secret_name or os.environ.get(
+            "DB_SECRET_NAME",
+            "sentineliq/rds/postgres",
+        )
+        self.db_host = db_host or os.environ.get("DB_HOST")
+        self.db_port = db_port or os.environ.get("DB_PORT", "5432")
+        self.db_name = db_name or os.environ.get("DB_NAME")
+        self.secrets_client = secrets_client or boto3.client(
+            "secretsmanager"
+        )
+
     # ==========================================================
-    # DYNAMODB SERIALIZATION
+    # POSTGRESQL CONNECTION
+    # ==========================================================
+
+    def get_postgres_connection(self):
+        """
+        Create a PostgreSQL connection using credentials stored in
+        AWS Secrets Manager.
+        """
+        logger.info(
+            "Retrieving PostgreSQL credentials from Secrets Manager: %s",
+            self.secret_name,
+        )
+
+        secret_response = self.secrets_client.get_secret_value(
+            SecretId=self.secret_name
+        )
+
+        secret_string = secret_response.get("SecretString")
+
+        if not secret_string:
+            raise ValueError(
+                "Secrets Manager secret does not contain SecretString"
+            )
+
+        secret = json.loads(secret_string)
+
+        username = secret.get("username")
+        password = secret.get("password")
+
+        if not username or not password:
+            raise ValueError(
+                "PostgreSQL credentials missing from Secrets Manager secret"
+            )
+
+        if not self.db_host:
+            raise ValueError("DB_HOST environment variable is required")
+
+        if not self.db_name:
+            raise ValueError("DB_NAME environment variable is required")
+
+        logger.info(
+            "Connecting to PostgreSQL database '%s' at '%s:%s'",
+            self.db_name,
+            self.db_host,
+            self.db_port,
+        )
+
+        return psycopg2.connect(
+            host=self.db_host,
+            port=self.db_port,
+            dbname=self.db_name,
+            user=username,
+            password=password,
+            connect_timeout=10,
+        )
+
+    # ==========================================================
+    # ROW -> DOMAIN MODEL
     # ==========================================================
 
     @staticmethod
-    def _convert_floats_to_decimal(value):
+    def _row_to_profile(row):
         """
-        Recursively convert Python floats to Decimal.
-
-        DynamoDB does not support Python float values.
-        This conversion handles floats inside:
-
-        - dictionaries
-        - lists
-        - tuples
-        - nested structures
-
-        Other values are returned unchanged.
+        Convert a PostgreSQL customers row into CustomerProfile.
         """
+        if row is None:
+            return None
 
-        if isinstance(value, float):
-            return Decimal(str(value))
+        (
+            customer_id,
+            first_seen,
+            last_seen,
+            total_transactions,
+            total_amount,
+            average_amount,
+            highest_amount,
+            lowest_amount,
+            failed_transactions,
+            successful_transactions,
+            known_devices,
+            known_locations,
+            known_payment_methods,
+            known_merchants,
+            known_ips,
+            recent_transactions,
+        ) = row
 
-        if isinstance(value, dict):
-            return {
-                key: CustomerProfileRepository._convert_floats_to_decimal(
-                    item
-                )
-                for key, item in value.items()
-            }
-
-        if isinstance(value, list):
-            return [
-                CustomerProfileRepository._convert_floats_to_decimal(
-                    item
-                )
-                for item in value
-            ]
-
-        if isinstance(value, tuple):
-            return tuple(
-                CustomerProfileRepository._convert_floats_to_decimal(
-                    item
-                )
-                for item in value
-            )
-
-        return value
+        return CustomerProfile(
+            customer_id=int(customer_id),
+            first_seen=first_seen,
+            last_seen=last_seen,
+            total_transactions=int(total_transactions or 0),
+            total_amount=float(total_amount or 0),
+            average_amount=float(average_amount or 0),
+            highest_amount=float(highest_amount or 0),
+            lowest_amount=float(lowest_amount or 0),
+            failed_transactions=int(failed_transactions or 0),
+            successful_transactions=int(successful_transactions or 0),
+            known_devices=known_devices or [],
+            known_locations=known_locations or [],
+            known_payment_methods=known_payment_methods or [],
+            known_merchants=known_merchants or [],
+            known_ips=known_ips or [],
+            recent_transactions=recent_transactions or [],
+        )
 
     # ==========================================================
-    # RETRIEVE PROFILE
+    # PROFILE RETRIEVAL
     # ==========================================================
 
     def get_profile(self, customer_id):
         """
         Retrieve an existing customer profile.
+
+        Returns:
+            CustomerProfile | None
         """
+        connection = self.get_postgres_connection()
 
-        response = CUSTOMER_PROFILES_TABLE.get_item(
-            Key={
-                "customer_id": customer_id
-            }
-        )
+        try:
+            with connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT
+                            customer_id,
+                            first_seen,
+                            last_seen,
+                            total_transactions,
+                            total_amount,
+                            average_amount,
+                            highest_amount,
+                            lowest_amount,
+                            failed_transactions,
+                            successful_transactions,
+                            known_devices,
+                            known_locations,
+                            known_payment_methods,
+                            known_merchants,
+                            known_ips,
+                            recent_transactions
+                        FROM customers
+                        WHERE customer_id = %s
+                        """,
+                        (customer_id,),
+                    )
 
-        item = response.get("Item")
+                    row = cursor.fetchone()
 
-        if not item:
-            return None
+            return self._row_to_profile(row)
 
-        # ======================================================
-        # DYNAMODB DECIMAL -> PYTHON FLOAT
-        # ======================================================
-
-        item["total_amount"] = float(
-            item.get("total_amount", 0)
-        )
-
-        item["average_amount"] = float(
-            item.get("average_amount", 0)
-        )
-
-        item["highest_amount"] = float(
-            item.get("highest_amount", 0)
-        )
-
-        item["lowest_amount"] = float(
-            item.get("lowest_amount", 0)
-        )
-
-        # ======================================================
-        # DYNAMODB NUMBERS
-        # ======================================================
-
-        item["total_transactions"] = int(
-            item.get("total_transactions", 0)
-        )
-
-        item["failed_transactions"] = int(
-            item.get("failed_transactions", 0)
-        )
-
-        item["successful_transactions"] = int(
-            item.get("successful_transactions", 0)
-        )
-
-        # ======================================================
-        # DATE CONVERSION
-        # ======================================================
-
-        first_seen = item.get("first_seen")
-
-        if first_seen:
-            item["first_seen"] = datetime.fromisoformat(
-                first_seen
-            )
-        else:
-            item["first_seen"] = None
-
-        last_seen = item.get("last_seen")
-
-        if last_seen:
-            item["last_seen"] = datetime.fromisoformat(
-                last_seen
-            )
-        else:
-            item["last_seen"] = None
-
-        # ======================================================
-        # LISTS
-        # ======================================================
-
-        item["known_devices"] = item.get(
-            "known_devices",
-            []
-        )
-
-        item["known_locations"] = item.get(
-            "known_locations",
-            []
-        )
-
-        item["known_payment_methods"] = item.get(
-            "known_payment_methods",
-            []
-        )
-
-        item["known_merchants"] = item.get(
-            "known_merchants",
-            []
-        )
-
-        item["known_ips"] = item.get(
-            "known_ips",
-            []
-        )
-
-        item["recent_transactions"] = item.get(
-            "recent_transactions",
-            []
-        )
-
-        return CustomerProfile(**item)
+        finally:
+            connection.close()
 
     # ==========================================================
     # CREATE PROFILE
@@ -181,45 +213,147 @@ class CustomerProfileRepository:
     def create_profile(self, customer_id):
         """
         Create an empty behavioural profile.
+
+        The insert is idempotent. If another request creates the
+        same customer concurrently, the existing row is retained.
         """
+        profile = CustomerProfile(customer_id=customer_id)
 
-        profile = CustomerProfile(
-            customer_id=customer_id
-        )
+        connection = self.get_postgres_connection()
 
-        self.save(profile)
+        try:
+            with connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO customers (
+                            customer_id,
+                            first_seen,
+                            last_seen,
+                            total_transactions,
+                            total_amount,
+                            average_amount,
+                            highest_amount,
+                            lowest_amount,
+                            failed_transactions,
+                            successful_transactions,
+                            known_devices,
+                            known_locations,
+                            known_payment_methods,
+                            known_merchants,
+                            known_ips,
+                            recent_transactions
+                        )
+                        VALUES (
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s
+                        )
+                        ON CONFLICT (customer_id) DO NOTHING
+                        """,
+                        self._profile_values(profile),
+                    )
 
-        return profile
+            return profile
+
+        finally:
+            connection.close()
 
     # ==========================================================
-    # SAVE PROFILE
+    # PROFILE SAVE
     # ==========================================================
 
     def save(self, profile):
         """
-        Persist a customer profile to DynamoDB.
+        Persist a customer profile.
 
-        All Python float values are recursively converted
-        to Decimal before the DynamoDB write.
+        The complete profile is written using an upsert so that the
+        operation works for both newly-created and existing profiles.
         """
+        connection = self.get_postgres_connection()
 
-        item = profile.to_dict()
+        try:
+            with connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        INSERT INTO customers (
+                            customer_id,
+                            first_seen,
+                            last_seen,
+                            total_transactions,
+                            total_amount,
+                            average_amount,
+                            highest_amount,
+                            lowest_amount,
+                            failed_transactions,
+                            successful_transactions,
+                            known_devices,
+                            known_locations,
+                            known_payment_methods,
+                            known_merchants,
+                            known_ips,
+                            recent_transactions
+                        )
+                        VALUES (
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s
+                        )
+                        ON CONFLICT (customer_id)
+                        DO UPDATE SET
+                            first_seen = EXCLUDED.first_seen,
+                            last_seen = EXCLUDED.last_seen,
+                            total_transactions =
+                                EXCLUDED.total_transactions,
+                            total_amount = EXCLUDED.total_amount,
+                            average_amount = EXCLUDED.average_amount,
+                            highest_amount = EXCLUDED.highest_amount,
+                            lowest_amount = EXCLUDED.lowest_amount,
+                            failed_transactions =
+                                EXCLUDED.failed_transactions,
+                            successful_transactions =
+                                EXCLUDED.successful_transactions,
+                            known_devices = EXCLUDED.known_devices,
+                            known_locations = EXCLUDED.known_locations,
+                            known_payment_methods =
+                                EXCLUDED.known_payment_methods,
+                            known_merchants = EXCLUDED.known_merchants,
+                            known_ips = EXCLUDED.known_ips,
+                            recent_transactions =
+                                EXCLUDED.recent_transactions
+                        """,
+                        self._profile_values(profile),
+                    )
 
-        # ======================================================
-        # RECURSIVE FLOAT -> DECIMAL CONVERSION
-        # ======================================================
-
-        item = self._convert_floats_to_decimal(
-            item
-        )
-
-        # ======================================================
-        # PERSIST
-        # ======================================================
-
-        CUSTOMER_PROFILES_TABLE.put_item(
-            Item=item
-        )
+        finally:
+            connection.close()
 
     # ==========================================================
     # GET OR CREATE
@@ -229,15 +363,40 @@ class CustomerProfileRepository:
         """
         Retrieve a profile or create one if it does not exist.
         """
-
-        profile = self.get_profile(
-            customer_id
-        )
+        profile = self.get_profile(customer_id)
 
         if profile is None:
-
-            profile = self.create_profile(
-                customer_id
-            )
+            profile = self.create_profile(customer_id)
 
         return profile
+
+    # ==========================================================
+    # PROFILE -> SQL VALUES
+    # ==========================================================
+
+    @classmethod
+    def _profile_values(cls, profile):
+        """
+        Convert CustomerProfile into PostgreSQL query parameters.
+
+        JSON-compatible fields are wrapped with psycopg2.extras.Json
+        so PostgreSQL stores them in JSONB columns.
+        """
+        return (
+            profile.customer_id,
+            profile.first_seen,
+            profile.last_seen,
+            profile.total_transactions,
+            profile.total_amount,
+            profile.average_amount,
+            profile.highest_amount,
+            profile.lowest_amount,
+            profile.failed_transactions,
+            profile.successful_transactions,
+            Json(profile.known_devices),
+            Json(profile.known_locations),
+            Json(profile.known_payment_methods),
+            Json(profile.known_merchants),
+            Json(profile.known_ips),
+            Json(profile.recent_transactions),
+        )
