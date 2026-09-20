@@ -3,11 +3,12 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 
 Description: >
+
   RuztIQ serverless fraud detection pipeline.
-  Exposes a fraud scoring API through API Gateway,
-  processes transactions with Lambda and PostgreSQL,
-  and retains the legacy DynamoDB stream synchronization
-  path during the migration period.
+
+  Exposes a fraud scoring API through API Gateway
+
+  and processes transactions with Lambda and PostgreSQL.
 
 Parameters:
 
@@ -18,23 +19,6 @@ Parameters:
   ApiAuthSecretArn:
     Type: String
     Description: ARN of the RuztIQ API authentication secret in AWS Secrets Manager
-
-  TransactionsTableArn:
-    Type: String
-    Description: ARN of the existing Transactions DynamoDB table
-
-  FraudResultsTableArn:
-    Type: String
-    Description: ARN of the existing FraudResults DynamoDB table
-
-  CustomerProfilesTableArn:
-    Type: String
-    Description: ARN of the existing CustomerProfiles DynamoDB table
-
-  FraudResultsStreamArn:
-    Type: String
-    Description: ARN of the existing FraudResults DynamoDB Stream
-
 
 Globals:
 
@@ -135,58 +119,6 @@ Resources:
           DB_NAME: fintech_fraud
 
 
-  FraudResultsSyncFunction:
-    Type: AWS::Serverless::Function
-
-    Properties:
-      CodeUri: ..
-      Handler: src/lambda_function/sync_handler.lambda_handler
-      Runtime: python3.11
-      Timeout: 60
-      MemorySize: 256
-
-      VpcConfig:
-        SecurityGroupIds:
-          - sg-028fe4b2505cf5132
-        SubnetIds:
-          - subnet-0a08dd16941d5025e
-
-      Events:
-        FraudResultsStream:
-          Type: DynamoDB
-          Properties:
-            Stream: !Ref FraudResultsStreamArn
-            StartingPosition: LATEST
-            BatchSize: 10
-
-      Policies:
-        - AWSLambdaBasicExecutionRole
-
-        - Statement:
-            - Effect: Allow
-              Action:
-                - dynamodb:GetRecords
-                - dynamodb:GetShardIterator
-                - dynamodb:DescribeStream
-                - dynamodb:ListStreams
-              Resource:
-                - !Ref FraudResultsStreamArn
-
-        - Statement:
-            - Effect: Allow
-              Action:
-                - secretsmanager:GetSecretValue
-              Resource:
-                - !Ref DBSecretArn
-
-      Environment:
-        Variables:
-          DB_SECRET_NAME: sentineliq/rds/postgres
-          DB_HOST: sentineliq-postgres.clsq8ogwm7qk.eu-west-1.rds.amazonaws.com
-          DB_PORT: '5432'
-          DB_NAME: fintech_fraud
-
-
   FraudDetectionFunctionErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
 
@@ -224,56 +156,6 @@ Resources:
       Dimensions:
         - Name: FunctionName
           Value: !Ref FraudDetectionFunction
-
-      Statistic: Sum
-      Period: 300
-      EvaluationPeriods: 1
-      DatapointsToAlarm: 1
-      Threshold: 1
-
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      TreatMissingData: notBreaching
-
-
-  FraudResultsSyncFunctionErrorsAlarm:
-    Type: AWS::CloudWatch::Alarm
-
-    Properties:
-      AlarmDescription: >
-        Alerts when the RuztIQ legacy DynamoDB to PostgreSQL
-        synchronization Lambda records errors.
-
-      Namespace: AWS/Lambda
-      MetricName: Errors
-
-      Dimensions:
-        - Name: FunctionName
-          Value: !Ref FraudResultsSyncFunction
-
-      Statistic: Sum
-      Period: 300
-      EvaluationPeriods: 1
-      DatapointsToAlarm: 1
-      Threshold: 1
-
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      TreatMissingData: notBreaching
-
-
-  FraudResultsSyncFunctionThrottlesAlarm:
-    Type: AWS::CloudWatch::Alarm
-
-    Properties:
-      AlarmDescription: >
-        Alerts when the RuztIQ legacy DynamoDB to PostgreSQL
-        synchronization Lambda is throttled.
-
-      Namespace: AWS/Lambda
-      MetricName: Throttles
-
-      Dimensions:
-        - Name: FunctionName
-          Value: !Ref FraudResultsSyncFunction
 
       Statistic: Sum
       Period: 300
@@ -381,34 +263,7 @@ Outputs:
       !GetAtt FraudDetectionFunction.Arn
 
 
-  FraudResultsSyncFunctionArn:
-    Description: RuztIQ legacy DynamoDB to PostgreSQL synchronization Lambda ARN
-    Value:
-      !GetAtt FraudResultsSyncFunction.Arn
-
-
   RuztIQApiAuthorizerFunctionArn:
     Description: RuztIQ API Lambda authorizer ARN
     Value:
       !GetAtt RuztIQApiAuthorizerFunction.Arn
-
-
-  TransactionsTableName:
-    Description: Existing RuztIQ Transactions DynamoDB Table
-    Value: Transactions
-
-
-  FraudResultsTableName:
-    Description: Existing RuztIQ Fraud Results DynamoDB Table
-    Value: FraudResults
-
-
-  CustomerProfilesTableName:
-    Description: Existing RuztIQ Customer Profiles DynamoDB Table
-    Value: CustomerProfiles
-
-
-  FraudResultsStreamArnOutput:
-    Description: Existing FraudResults DynamoDB Stream ARN
-    Value:
-      !Ref FraudResultsStreamArn

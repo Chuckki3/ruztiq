@@ -15,7 +15,7 @@ confirm_changeset = true
 
 capabilities = "CAPABILITY_IAM"
 
-parameter_overrides = "DBSecretArn=\"arn:aws:secretsmanager:eu-west-1:619240106198:secret:sentineliq/rds/postgres-KjWwNH\" ApiAuthSecretArn=\"arn:aws:secretsmanager:eu-west-1:619240106198:secret:sentineliq/api/auth-ZN9GWU\" TransactionsTableArn=\"arn:aws:dynamodb:eu-west-1:619240106198:table/Transactions\" FraudResultsTableArn=\"arn:aws:dynamodb:eu-west-1:619240106198:table/FraudResults\" CustomerProfilesTableArn=\"arn:aws:dynamodb:eu-west-1:619240106198:table/CustomerProfiles\" FraudResultsStreamArn=\"arn:aws:dynamodb:eu-west-1:619240106198:table/FraudResults/stream/2026-08-27T13:09:07.113\""
+parameter_overrides = "DBSecretArn=\"arn:aws:secretsmanager:eu-west-1:619240106198:secret:sentineliq/rds/postgres-KjWwNH\" ApiAuthSecretArn=\"arn:aws:secretsmanager:eu-west-1:619240106198:secret:sentineliq/api/auth-ZN9GWU\""
 
 image_repositories = []
 
