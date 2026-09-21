@@ -79,7 +79,6 @@ class CustomerProfileService:
         The profile becomes progressively richer as RuztIQ
         processes more transactions for the customer.
         """
-
         profile = self.get_or_create(
             transaction.customer_id
         )
@@ -89,9 +88,7 @@ class CustomerProfileService:
         # ------------------------------------------------------
 
         profile.total_transactions += 1
-
         profile.total_amount += transaction.amount
-
         profile.average_amount = (
             profile.total_amount
             / profile.total_transactions
@@ -202,7 +199,7 @@ class CustomerProfileService:
         # Recent transaction history
         #
         # Keep this lightweight. Full transaction records remain
-        # in DynamoDB's Transactions table.
+        # in the transactions table.
         # ------------------------------------------------------
 
         recent_transaction = {

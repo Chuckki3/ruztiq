@@ -4,18 +4,15 @@ on:
   push:
     branches:
       - main
-
   pull_request:
     branches:
       - main
 
 jobs:
   test:
-
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout Repository
         uses: actions/checkout@v4
 
@@ -33,7 +30,6 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-
           pip install \
             pytest \
             pytest-cov \
@@ -43,12 +39,10 @@ jobs:
 
       - name: Set Environment Variables
         run: |
-          echo "TRANSACTIONS_TABLE=Transactions" >> $GITHUB_ENV
-          echo "FRAUD_RESULTS_TABLE=FraudResults" >> $GITHUB_ENV
-          echo "AWS_DEFAULT_REGION=eu-west-1" >> $GITHUB_ENV
-          echo "AWS_ACCESS_KEY_ID=dummy" >> $GITHUB_ENV
-          echo "AWS_SECRET_ACCESS_KEY=dummy" >> $GITHUB_ENV
-          echo "AWS_SESSION_TOKEN=dummy" >> $GITHUB_ENV
+          echo "AWS_DEFAULT_REGION=eu-west-1" >> "$GITHUB_ENV"
+          echo "AWS_ACCESS_KEY_ID=dummy" >> "$GITHUB_ENV"
+          echo "AWS_SECRET_ACCESS_KEY=dummy" >> "$GITHUB_ENV"
+          echo "AWS_SESSION_TOKEN=dummy" >> "$GITHUB_ENV"
 
       - name: Run Tests with Coverage
         run: |

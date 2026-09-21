@@ -1,11 +1,11 @@
-from datetime import datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
 
 
 class VelocityEngine:
     """
     Detects unusually high transaction frequency for a customer.
 
-    The engine is intentionally independent of DynamoDB and the
+    The engine is intentionally independent of persistence and the
     FraudEngine. It receives transaction history and determines
     whether the customer has exceeded a configurable velocity limit.
     """
@@ -42,7 +42,6 @@ class VelocityEngine:
 
         transaction_history should contain Transaction objects.
         """
-
         if not transaction_history:
             return 0
 
@@ -54,7 +53,6 @@ class VelocityEngine:
         count = 0
 
         for transaction in transaction_history:
-
             transaction_time_value = (
                 transaction.transaction_time
             )
@@ -77,7 +75,6 @@ class VelocityEngine:
         Return True when transaction velocity reaches
         or exceeds the configured threshold.
         """
-
         recent_count = self.count_recent_transactions(
             transaction_time,
             transaction_history,
@@ -104,7 +101,6 @@ class VelocityEngine:
                 "reason": str | None
             }
         """
-
         recent_count = self.count_recent_transactions(
             transaction_time,
             transaction_history,
@@ -116,7 +112,6 @@ class VelocityEngine:
         )
 
         if violation:
-
             return {
                 "score": 25,
                 "recent_transactions": recent_count,
@@ -143,12 +138,10 @@ class VelocityEngine:
         Safely compare timezone-aware and naive UTC timestamps.
 
         This prevents datetime comparison errors while the system
-        transitions from legacy datetime.utcnow() usage to
-        timezone-aware UTC timestamps.
+        uses both legacy naive UTC timestamps and timezone-aware
+        UTC timestamps.
         """
-
         if transaction_time.tzinfo is None:
-
             transaction_time = (
                 transaction_time.replace(
                     tzinfo=UTC
@@ -156,7 +149,6 @@ class VelocityEngine:
             )
 
         if window_start.tzinfo is None:
-
             window_start = (
                 window_start.replace(
                     tzinfo=UTC
@@ -164,7 +156,6 @@ class VelocityEngine:
             )
 
         if transaction_time_end.tzinfo is None:
-
             transaction_time_end = (
                 transaction_time_end.replace(
                     tzinfo=UTC

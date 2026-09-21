@@ -1,28 +1,12 @@
-import os
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
 import pytest
-
-#
-# Fake Lambda environment variables
-#
-
-os.environ.setdefault(
-    "TRANSACTIONS_TABLE",
-    "Transactions",
-)
-
-os.environ.setdefault(
-    "FRAUD_RESULTS_TABLE",
-    "FraudResults",
-)
 
 from src.models.transaction import Transaction
 
 
 @pytest.fixture
 def sample_transaction():
-
     return Transaction(
         customer_id=1,
         transaction_reference="TEST-123456",
@@ -48,7 +32,6 @@ def sample_transaction():
 
 @pytest.fixture
 def suspicious_transaction():
-
     return Transaction(
         customer_id=1,
         transaction_reference="TEST-FRAUD",

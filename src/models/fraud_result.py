@@ -18,13 +18,10 @@ class FraudResult:
 
     def to_dict(self) -> dict[str, Any]:
         """
-        Convert the fraud result into a dictionary suitable for DynamoDB.
+        Convert the fraud result into a serializable dictionary.
         """
-
         data = asdict(self)
-
         data["evaluated_at"] = (
             self.evaluated_at.isoformat()
         )
-
         return data
