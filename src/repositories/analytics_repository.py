@@ -28,7 +28,7 @@ class AnalyticsRepository:
     ):
         self.secret_name = secret_name or os.environ.get(
             "DB_SECRET_NAME",
-            "ruztiq/rds/postgres",
+            "sentineliq/rds/postgres",
         )
         self.db_host = db_host or os.environ.get("DB_HOST")
         self.db_port = db_port or os.environ.get("DB_PORT", "5432")
