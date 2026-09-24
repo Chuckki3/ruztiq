@@ -1,26 +1,22 @@
-import json
-import logging
 import os
-from datetime import datetime
+from datetime import UTC, datetime
+from decimal import Decimal
 
 import boto3
-import psycopg2
-from psycopg2.extras import Json
+from botocore.exceptions import ClientError
 
 from src.models.customer_profile import CustomerProfile
 
 
-logger = logging.getLogger(__name__)
-
-
 class CustomerProfileRepository:
     """
-    PostgreSQL persistence boundary for customer behavioural profiles.
+    DynamoDB persistence boundary for customer behavioural profiles.
 
-    The repository translates between the CustomerProfile domain model
-    and the PostgreSQL `customers` table.
+    Customer profiles are stored in the CustomerProfiles table with
+    customer_id as the partition key.
 
-    PostgreSQL is the operational source of truth for customer profiles.
+    The repository translates between DynamoDB items and the
+    CustomerProfile domain model.
     """
 
     JSON_FIELDS = (
@@ -32,131 +28,229 @@ class CustomerProfileRepository:
         "recent_transactions",
     )
 
-    def __init__(
-        self,
-        secret_name=None,
-        db_host=None,
-        db_port=None,
-        db_name=None,
-        secrets_client=None,
-    ):
-        self.secret_name = secret_name or os.environ.get(
-            "DB_SECRET_NAME",
-            "sentineliq/rds/postgres",
+    def __init__(self):
+        self.region_name = os.getenv(
+            "AWS_REGION_NAME",
+            "eu-west-1",
         )
-        self.db_host = db_host or os.environ.get("DB_HOST")
-        self.db_port = db_port or os.environ.get("DB_PORT", "5432")
-        self.db_name = db_name or os.environ.get("DB_NAME")
-        self.secrets_client = secrets_client or boto3.client(
-            "secretsmanager"
+        self.table_name = os.getenv(
+            "CUSTOMER_PROFILES_TABLE",
+            "CustomerProfiles",
         )
+
+        self.dynamodb = boto3.resource(
+            "dynamodb",
+            region_name=self.region_name,
+        )
+        self.table = self.dynamodb.Table(self.table_name)
 
     # ==========================================================
-    # POSTGRESQL CONNECTION
-    # ==========================================================
-
-    def get_postgres_connection(self):
-        """
-        Create a PostgreSQL connection using credentials stored in
-        AWS Secrets Manager.
-        """
-        logger.info(
-            "Retrieving PostgreSQL credentials from Secrets Manager: %s",
-            self.secret_name,
-        )
-
-        secret_response = self.secrets_client.get_secret_value(
-            SecretId=self.secret_name
-        )
-
-        secret_string = secret_response.get("SecretString")
-
-        if not secret_string:
-            raise ValueError(
-                "Secrets Manager secret does not contain SecretString"
-            )
-
-        secret = json.loads(secret_string)
-
-        username = secret.get("username")
-        password = secret.get("password")
-
-        if not username or not password:
-            raise ValueError(
-                "PostgreSQL credentials missing from Secrets Manager secret"
-            )
-
-        if not self.db_host:
-            raise ValueError("DB_HOST environment variable is required")
-
-        if not self.db_name:
-            raise ValueError("DB_NAME environment variable is required")
-
-        logger.info(
-            "Connecting to PostgreSQL database '%s' at '%s:%s'",
-            self.db_name,
-            self.db_host,
-            self.db_port,
-        )
-
-        return psycopg2.connect(
-            host=self.db_host,
-            port=self.db_port,
-            dbname=self.db_name,
-            user=username,
-            password=password,
-            connect_timeout=10,
-        )
-
-    # ==========================================================
-    # ROW -> DOMAIN MODEL
+    # DATETIME CONVERSION
     # ==========================================================
 
     @staticmethod
-    def _row_to_profile(row):
+    def _normalize_datetime(value):
         """
-        Convert a PostgreSQL customers row into CustomerProfile.
+        Normalize datetimes to timezone-aware UTC.
         """
-        if row is None:
+        if value is None:
             return None
 
-        (
-            customer_id,
-            first_seen,
-            last_seen,
-            total_transactions,
-            total_amount,
-            average_amount,
-            highest_amount,
-            lowest_amount,
-            failed_transactions,
-            successful_transactions,
-            known_devices,
-            known_locations,
-            known_payment_methods,
-            known_merchants,
-            known_ips,
-            recent_transactions,
-        ) = row
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+
+        return value.astimezone(UTC)
+
+    @classmethod
+    def _datetime_to_string(cls, value):
+        """
+        Convert a datetime to a normalized UTC ISO-8601 string.
+        """
+        normalized = cls._normalize_datetime(value)
+
+        if normalized is None:
+            return None
+
+        return normalized.isoformat()
+
+    @staticmethod
+    def _string_to_datetime(value):
+        """
+        Convert a stored ISO-8601 string back to datetime.
+        """
+        if value is None:
+            return None
+
+        if isinstance(value, datetime):
+            return CustomerProfileRepository._normalize_datetime(
+                value
+            )
+
+        parsed = datetime.fromisoformat(str(value))
+
+        return CustomerProfileRepository._normalize_datetime(
+            parsed
+        )
+
+    # ==========================================================
+    # DYNAMODB ITEM -> DOMAIN MODEL
+    # ==========================================================
+
+    @staticmethod
+    def _item_to_profile(item):
+        """
+        Convert a DynamoDB item into CustomerProfile.
+        """
+        if item is None:
+            return None
 
         return CustomerProfile(
-            customer_id=int(customer_id),
-            first_seen=first_seen,
-            last_seen=last_seen,
-            total_transactions=int(total_transactions or 0),
-            total_amount=float(total_amount or 0),
-            average_amount=float(average_amount or 0),
-            highest_amount=float(highest_amount or 0),
-            lowest_amount=float(lowest_amount or 0),
-            failed_transactions=int(failed_transactions or 0),
-            successful_transactions=int(successful_transactions or 0),
-            known_devices=known_devices or [],
-            known_locations=known_locations or [],
-            known_payment_methods=known_payment_methods or [],
-            known_merchants=known_merchants or [],
-            known_ips=known_ips or [],
-            recent_transactions=recent_transactions or [],
+            customer_id=int(item["customer_id"]),
+            first_seen=(
+                CustomerProfileRepository._string_to_datetime(
+                    item.get("first_seen")
+                )
+            ),
+            last_seen=(
+                CustomerProfileRepository._string_to_datetime(
+                    item.get("last_seen")
+                )
+            ),
+            total_transactions=int(
+                item.get("total_transactions", 0)
+            ),
+            total_amount=float(
+                item.get("total_amount", 0)
+            ),
+            average_amount=float(
+                item.get("average_amount", 0)
+            ),
+            highest_amount=float(
+                item.get("highest_amount", 0)
+            ),
+            lowest_amount=float(
+                item.get("lowest_amount", 0)
+            ),
+            failed_transactions=int(
+                item.get("failed_transactions", 0)
+            ),
+            successful_transactions=int(
+                item.get("successful_transactions", 0)
+            ),
+            known_devices=list(
+                item.get("known_devices", [])
+            ),
+            known_locations=list(
+                item.get("known_locations", [])
+            ),
+            known_payment_methods=list(
+                item.get("known_payment_methods", [])
+            ),
+            known_merchants=list(
+                item.get("known_merchants", [])
+            ),
+            known_ips=list(
+                item.get("known_ips", [])
+            ),
+            recent_transactions=list(
+                item.get("recent_transactions", [])
+            ),
         )
+
+    # ==========================================================
+    # PROFILE -> DYNAMODB ITEM
+    # ==========================================================
+
+    @classmethod
+    def _profile_item(cls, profile):
+        """
+        Convert CustomerProfile into a DynamoDB-compatible item.
+
+        DynamoDB does not accept Python floats. Decimal is therefore
+        used for all persisted numeric values.
+        """
+        item = {
+            "customer_id": int(profile.customer_id),
+            "total_transactions": int(
+                profile.total_transactions
+            ),
+            "total_amount": Decimal(
+                str(profile.total_amount)
+            ),
+            "average_amount": Decimal(
+                str(profile.average_amount)
+            ),
+            "highest_amount": Decimal(
+                str(profile.highest_amount)
+            ),
+            "lowest_amount": Decimal(
+                str(profile.lowest_amount)
+            ),
+            "failed_transactions": int(
+                profile.failed_transactions
+            ),
+            "successful_transactions": int(
+                profile.successful_transactions
+            ),
+            "known_devices": list(
+                profile.known_devices
+            ),
+            "known_locations": list(
+                profile.known_locations
+            ),
+            "known_payment_methods": list(
+                profile.known_payment_methods
+            ),
+            "known_merchants": list(
+                profile.known_merchants
+            ),
+            "known_ips": list(
+                profile.known_ips
+            ),
+            "recent_transactions": (
+                cls._serialize_recent_transactions(
+                    profile.recent_transactions
+                )
+            ),
+        }
+
+        first_seen = cls._datetime_to_string(
+            profile.first_seen
+        )
+
+        if first_seen is not None:
+            item["first_seen"] = first_seen
+
+        last_seen = cls._datetime_to_string(
+            profile.last_seen
+        )
+
+        if last_seen is not None:
+            item["last_seen"] = last_seen
+
+        return item
+
+    @staticmethod
+    def _serialize_recent_transactions(
+        recent_transactions,
+    ):
+        """
+        Convert recent transaction records into DynamoDB-safe
+        values, including Decimal conversion for amounts.
+        """
+        serialized = []
+
+        for transaction in recent_transactions:
+            transaction_copy = dict(transaction)
+
+            if "amount" in transaction_copy:
+                transaction_copy["amount"] = Decimal(
+                    str(transaction_copy["amount"])
+                )
+
+            serialized.append(transaction_copy)
+
+        return serialized
 
     # ==========================================================
     # PROFILE RETRIEVAL
@@ -169,42 +263,15 @@ class CustomerProfileRepository:
         Returns:
             CustomerProfile | None
         """
-        connection = self.get_postgres_connection()
+        response = self.table.get_item(
+            Key={
+                "customer_id": int(customer_id),
+            }
+        )
 
-        try:
-            with connection:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        """
-                        SELECT
-                            customer_id,
-                            first_seen,
-                            last_seen,
-                            total_transactions,
-                            total_amount,
-                            average_amount,
-                            highest_amount,
-                            lowest_amount,
-                            failed_transactions,
-                            successful_transactions,
-                            known_devices,
-                            known_locations,
-                            known_payment_methods,
-                            known_merchants,
-                            known_ips,
-                            recent_transactions
-                        FROM customers
-                        WHERE customer_id = %s
-                        """,
-                        (customer_id,),
-                    )
-
-                    row = cursor.fetchone()
-
-            return self._row_to_profile(row)
-
-        finally:
-            connection.close()
+        return self._item_to_profile(
+            response.get("Item")
+        )
 
     # ==========================================================
     # CREATE PROFILE
@@ -214,63 +281,41 @@ class CustomerProfileRepository:
         """
         Create an empty behavioural profile.
 
-        The insert is idempotent. If another request creates the
-        same customer concurrently, the existing row is retained.
+        The conditional write makes creation idempotent and safe
+        when concurrent requests attempt to create the same
+        customer profile.
         """
-        profile = CustomerProfile(customer_id=customer_id)
-
-        connection = self.get_postgres_connection()
+        profile = CustomerProfile(
+            customer_id=int(customer_id)
+        )
 
         try:
-            with connection:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        """
-                        INSERT INTO customers (
-                            customer_id,
-                            first_seen,
-                            last_seen,
-                            total_transactions,
-                            total_amount,
-                            average_amount,
-                            highest_amount,
-                            lowest_amount,
-                            failed_transactions,
-                            successful_transactions,
-                            known_devices,
-                            known_locations,
-                            known_payment_methods,
-                            known_merchants,
-                            known_ips,
-                            recent_transactions
-                        )
-                        VALUES (
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s
-                        )
-                        ON CONFLICT (customer_id) DO NOTHING
-                        """,
-                        self._profile_values(profile),
-                    )
+            self.table.put_item(
+                Item=self._profile_item(profile),
+                ConditionExpression=(
+                    "attribute_not_exists(customer_id)"
+                ),
+            )
 
             return profile
 
-        finally:
-            connection.close()
+        except ClientError as exc:
+            error_code = exc.response.get(
+                "Error",
+                {},
+            ).get("Code")
+
+            if error_code != "ConditionalCheckFailedException":
+                raise
+
+            existing_profile = self.get_profile(
+                customer_id
+            )
+
+            if existing_profile is None:
+                raise
+
+            return existing_profile
 
     # ==========================================================
     # PROFILE SAVE
@@ -278,82 +323,16 @@ class CustomerProfileRepository:
 
     def save(self, profile):
         """
-        Persist a customer profile.
+        Persist the complete customer profile.
 
-        The complete profile is written using an upsert so that the
-        operation works for both newly-created and existing profiles.
+        A normal PutItem is intentionally used here because the
+        service has already loaded and updated the complete profile.
         """
-        connection = self.get_postgres_connection()
+        self.table.put_item(
+            Item=self._profile_item(profile)
+        )
 
-        try:
-            with connection:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        """
-                        INSERT INTO customers (
-                            customer_id,
-                            first_seen,
-                            last_seen,
-                            total_transactions,
-                            total_amount,
-                            average_amount,
-                            highest_amount,
-                            lowest_amount,
-                            failed_transactions,
-                            successful_transactions,
-                            known_devices,
-                            known_locations,
-                            known_payment_methods,
-                            known_merchants,
-                            known_ips,
-                            recent_transactions
-                        )
-                        VALUES (
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s,
-                            %s
-                        )
-                        ON CONFLICT (customer_id)
-                        DO UPDATE SET
-                            first_seen = EXCLUDED.first_seen,
-                            last_seen = EXCLUDED.last_seen,
-                            total_transactions =
-                                EXCLUDED.total_transactions,
-                            total_amount = EXCLUDED.total_amount,
-                            average_amount = EXCLUDED.average_amount,
-                            highest_amount = EXCLUDED.highest_amount,
-                            lowest_amount = EXCLUDED.lowest_amount,
-                            failed_transactions =
-                                EXCLUDED.failed_transactions,
-                            successful_transactions =
-                                EXCLUDED.successful_transactions,
-                            known_devices = EXCLUDED.known_devices,
-                            known_locations = EXCLUDED.known_locations,
-                            known_payment_methods =
-                                EXCLUDED.known_payment_methods,
-                            known_merchants = EXCLUDED.known_merchants,
-                            known_ips = EXCLUDED.known_ips,
-                            recent_transactions =
-                                EXCLUDED.recent_transactions
-                        """,
-                        self._profile_values(profile),
-                    )
-
-        finally:
-            connection.close()
+        return profile
 
     # ==========================================================
     # GET OR CREATE
@@ -366,37 +345,8 @@ class CustomerProfileRepository:
         profile = self.get_profile(customer_id)
 
         if profile is None:
-            profile = self.create_profile(customer_id)
+            profile = self.create_profile(
+                customer_id
+            )
 
         return profile
-
-    # ==========================================================
-    # PROFILE -> SQL VALUES
-    # ==========================================================
-
-    @classmethod
-    def _profile_values(cls, profile):
-        """
-        Convert CustomerProfile into PostgreSQL query parameters.
-
-        JSON-compatible fields are wrapped with psycopg2.extras.Json
-        so PostgreSQL stores them in JSONB columns.
-        """
-        return (
-            profile.customer_id,
-            profile.first_seen,
-            profile.last_seen,
-            profile.total_transactions,
-            profile.total_amount,
-            profile.average_amount,
-            profile.highest_amount,
-            profile.lowest_amount,
-            profile.failed_transactions,
-            profile.successful_transactions,
-            Json(profile.known_devices),
-            Json(profile.known_locations),
-            Json(profile.known_payment_methods),
-            Json(profile.known_merchants),
-            Json(profile.known_ips),
-            Json(profile.recent_transactions),
-        )

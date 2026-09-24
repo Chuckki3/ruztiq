@@ -1,206 +1,168 @@
-import json
 import logging
 import os
-from datetime import datetime
+from datetime import UTC, datetime
+from decimal import Decimal
 
 import boto3
-import psycopg2
+from botocore.exceptions import ClientError
 
 from src.models.fraud_result import FraudResult
+
 
 logger = logging.getLogger(__name__)
 
 
 class FraudRepository:
     """
-    PostgreSQL-backed repository responsible for persisting
-    fraud evaluation results.
+    DynamoDB persistence boundary for fraud evaluation results.
+
+    Fraud results are stored in the FraudResults table with
+    transaction_reference as the partition key.
+
+    The repository translates between DynamoDB items and the
+    FraudResult domain model while preserving persisted decision
+    snapshots and legacy-result compatibility.
     """
 
     def __init__(self):
-        self.db_secret_name = os.getenv(
-            "DB_SECRET_NAME",
-            "sentineliq/rds/postgres",
+        self.region_name = os.getenv(
+            "AWS_REGION_NAME",
+            "eu-west-1",
         )
-        self.db_host = os.getenv("DB_HOST")
-        self.db_port = int(
-            os.getenv("DB_PORT", "5432")
-        )
-        self.db_name = os.getenv("DB_NAME")
-
-        self.secrets_client = boto3.client(
-            "secretsmanager"
+        self.table_name = os.getenv(
+            "FRAUD_RESULTS_TABLE",
+            "FraudResults",
         )
 
-    def _get_database_credentials(self):
-        response = self.secrets_client.get_secret_value(
-            SecretId=self.db_secret_name
+        self.dynamodb = boto3.resource(
+            "dynamodb",
+            region_name=self.region_name,
+        )
+        self.table = self.dynamodb.Table(
+            self.table_name
         )
 
-        secret_string = response.get("SecretString")
-        if not secret_string:
-            raise ValueError(
-                "Database secret does not contain SecretString"
-            )
+    @staticmethod
+    def _normalize_datetime(value):
+        if value is None:
+            return None
 
-        secret = json.loads(secret_string)
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
 
-        username = secret.get("username")
-        password = secret.get("password")
+        return value.astimezone(UTC)
 
-        if not username or not password:
-            raise ValueError(
-                "Database secret must contain username and password"
-            )
+    @classmethod
+    def _datetime_to_string(cls, value):
+        normalized = cls._normalize_datetime(value)
 
-        return username, password
+        if normalized is None:
+            return None
 
-    def _get_connection(self):
-        username, password = (
-            self._get_database_credentials()
+        return normalized.isoformat()
+
+    @classmethod
+    def _string_to_datetime(cls, value):
+        if value is None:
+            return None
+
+        if isinstance(value, datetime):
+            return cls._normalize_datetime(value)
+
+        parsed = datetime.fromisoformat(
+            str(value)
         )
 
-        return psycopg2.connect(
-            host=self.db_host,
-            port=self.db_port,
-            dbname=self.db_name,
-            user=username,
-            password=password,
-            connect_timeout=10,
-        )
+        return cls._normalize_datetime(parsed)
 
-    def get_result(
-        self,
-        transaction_reference: str,
-    ) -> dict | None:
-        """
-        Retrieve an existing fraud evaluation and its
-        persisted decision snapshot.
+    @staticmethod
+    def _item_to_fraud_result(item):
+        if item is None:
+            return None
 
-        Returns:
-            A dictionary containing:
-                fraud_result: FraudResult
-                decision: persisted decision dictionary
+        evaluated_at = item.get("evaluated_at")
 
-            None if no result exists.
-
-        Legacy fraud results created before decision
-        persistence are supported. In that case the decision
-        dictionary is reconstructed from the stored fraud
-        result with velocity_violation=False.
-        """
-        connection = None
-        cursor = None
-
-        try:
-            connection = self._get_connection()
-            cursor = connection.cursor()
-
-            cursor.execute(
-                """
-                SELECT
-                    transaction_reference,
-                    risk_score,
-                    risk_level,
-                    is_fraud,
-                    reasons,
-                    evaluated_at,
-                    decision,
-                    decision_reason,
-                    decision_risk_score,
-                    decision_risk_level,
-                    decision_is_fraud,
-                    velocity_violation
-                FROM fraud_results
-                WHERE transaction_reference = %s
-                """,
-                (transaction_reference,),
-            )
-
-            row = cursor.fetchone()
-
-            if row is None:
-                return None
-
-            (
-                stored_reference,
-                risk_score,
-                risk_level,
-                is_fraud,
-                reasons,
-                evaluated_at,
-                decision,
-                decision_reason,
-                decision_risk_score,
-                decision_risk_level,
-                decision_is_fraud,
-                velocity_violation,
-            ) = row
-
-            fraud_result = FraudResult(
-                transaction_reference=str(
-                    stored_reference
-                ),
-                risk_score=int(risk_score),
-                risk_level=str(risk_level),
-                is_fraud=bool(is_fraud),
-                reasons=str(reasons),
-                evaluated_at=evaluated_at,
-            )
-
-            if decision is None:
-                persisted_decision = (
-                    self._legacy_decision(fraud_result)
+        return FraudResult(
+            transaction_reference=str(
+                item["transaction_reference"]
+            ),
+            risk_score=int(
+                item.get("risk_score", 0)
+            ),
+            risk_level=str(
+                item.get("risk_level", "")
+            ),
+            is_fraud=bool(
+                item.get("is_fraud", False)
+            ),
+            reasons=str(
+                item.get("reasons", "")
+            ),
+            evaluated_at=(
+                FraudRepository._string_to_datetime(
+                    evaluated_at
                 )
-            else:
-                persisted_decision = str(decision)
+            ),
+        )
 
-            decision_snapshot = {
-                "decision": persisted_decision,
-                "decision_reason": (
-                    str(decision_reason)
-                    if decision_reason is not None
-                    else "Existing fraud result"
+    @classmethod
+    def _result_item(
+        cls,
+        result: FraudResult,
+    ):
+        return {
+            "transaction_reference": str(
+                result.transaction_reference
+            ),
+            "risk_score": int(
+                result.risk_score
+            ),
+            "risk_level": str(
+                result.risk_level
+            ),
+            "is_fraud": bool(
+                result.is_fraud
+            ),
+            "reasons": str(
+                result.reasons
+            ),
+            "evaluated_at": cls._datetime_to_string(
+                result.evaluated_at
+            ),
+        }
+
+    @classmethod
+    def _result_with_decision_item(
+        cls,
+        result: FraudResult,
+        decision: dict,
+    ):
+        item = cls._result_item(result)
+
+        item.update(
+            {
+                "decision": str(
+                    decision["decision"]
                 ),
-                "risk_score": int(
-                    decision_risk_score
-                    if decision_risk_score is not None
-                    else fraud_result.risk_score
+                "decision_reason": str(
+                    decision["decision_reason"]
                 ),
-                "risk_level": (
-                    str(decision_risk_level)
-                    if decision_risk_level is not None
-                    else fraud_result.risk_level
+                "decision_risk_score": int(
+                    decision["risk_score"]
                 ),
-                "is_fraud": bool(
-                    decision_is_fraud
-                    if decision_is_fraud is not None
-                    else fraud_result.is_fraud
+                "decision_risk_level": str(
+                    decision["risk_level"]
+                ),
+                "decision_is_fraud": bool(
+                    decision["is_fraud"]
                 ),
                 "velocity_violation": bool(
-                    velocity_violation
-                    if velocity_violation is not None
-                    else False
+                    decision["velocity_violation"]
                 ),
             }
+        )
 
-            return {
-                "fraud_result": fraud_result,
-                "decision": decision_snapshot,
-            }
-
-        except Exception:
-            logger.exception(
-                "Failed to retrieve fraud result: %s",
-                transaction_reference,
-            )
-            raise
-
-        finally:
-            if cursor is not None:
-                cursor.close()
-            if connection is not None:
-                connection.close()
+        return item
 
     @staticmethod
     def _legacy_decision(
@@ -209,8 +171,6 @@ class FraudRepository:
         """
         Provide a conservative decision for fraud results
         created before decision snapshots were persisted.
-
-        This is only used for legacy records.
         """
         if fraud_result.risk_score >= 80:
             return "DECLINE"
@@ -226,46 +186,131 @@ class FraudRepository:
 
         return "APPROVE"
 
+    @staticmethod
+    def _decision_snapshot(
+        item,
+        fraud_result: FraudResult,
+    ):
+        decision = item.get("decision")
+
+        if decision is None:
+            persisted_decision = (
+                FraudRepository._legacy_decision(
+                    fraud_result
+                )
+            )
+        else:
+            persisted_decision = str(decision)
+
+        decision_reason = item.get(
+            "decision_reason"
+        )
+
+        decision_risk_score = item.get(
+            "decision_risk_score"
+        )
+
+        decision_risk_level = item.get(
+            "decision_risk_level"
+        )
+
+        decision_is_fraud = item.get(
+            "decision_is_fraud"
+        )
+
+        velocity_violation = item.get(
+            "velocity_violation"
+        )
+
+        return {
+            "decision": persisted_decision,
+            "decision_reason": (
+                str(decision_reason)
+                if decision_reason is not None
+                else "Existing fraud result"
+            ),
+            "risk_score": int(
+                decision_risk_score
+                if decision_risk_score is not None
+                else fraud_result.risk_score
+            ),
+            "risk_level": (
+                str(decision_risk_level)
+                if decision_risk_level is not None
+                else fraud_result.risk_level
+            ),
+            "is_fraud": bool(
+                decision_is_fraud
+                if decision_is_fraud is not None
+                else fraud_result.is_fraud
+            ),
+            "velocity_violation": bool(
+                velocity_violation
+                if velocity_violation is not None
+                else False
+            ),
+        }
+
+    def get_result(
+        self,
+        transaction_reference: str,
+    ) -> dict | None:
+        """
+        Retrieve an existing fraud evaluation and its
+        persisted decision snapshot.
+
+        Returns None when no result exists.
+
+        Legacy records without decision fields are supported
+        by reconstructing the decision from the FraudResult.
+        """
+        try:
+            response = self.table.get_item(
+                Key={
+                    "transaction_reference": str(
+                        transaction_reference
+                    )
+                }
+            )
+
+            item = response.get("Item")
+
+            if item is None:
+                return None
+
+            fraud_result = self._item_to_fraud_result(
+                item
+            )
+
+            return {
+                "fraud_result": fraud_result,
+                "decision": self._decision_snapshot(
+                    item,
+                    fraud_result,
+                ),
+            }
+
+        except Exception:
+            logger.exception(
+                "Failed to retrieve fraud result: %s",
+                transaction_reference,
+            )
+            raise
+
     def insert_result(
         self,
         result: FraudResult,
     ) -> None:
         """
-        Store a fraud evaluation result in PostgreSQL.
+        Store a fraud evaluation result.
 
-        This method preserves the original repository
-        behaviour and remains available for existing callers.
+        This method preserves the original public repository
+        interface and performs a normal DynamoDB put.
         """
-        connection = None
-        cursor = None
-
         try:
-            connection = self._get_connection()
-            cursor = connection.cursor()
-
-            cursor.execute(
-                """
-                INSERT INTO fraud_results (
-                    transaction_reference,
-                    risk_score,
-                    risk_level,
-                    is_fraud,
-                    reasons,
-                    evaluated_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    result.transaction_reference,
-                    result.risk_score,
-                    result.risk_level,
-                    result.is_fraud,
-                    result.reasons,
-                    result.evaluated_at,
-                ),
+            self.table.put_item(
+                Item=self._result_item(result)
             )
-
-            connection.commit()
 
             logger.info(
                 "Fraud result stored: %s",
@@ -273,20 +318,11 @@ class FraudRepository:
             )
 
         except Exception:
-            if connection is not None:
-                connection.rollback()
-
             logger.exception(
                 "Failed to store fraud result: %s",
                 result.transaction_reference,
             )
             raise
-
-        finally:
-            if cursor is not None:
-                cursor.close()
-            if connection is not None:
-                connection.close()
 
     def insert_result_if_absent(
         self,
@@ -297,81 +333,47 @@ class FraudRepository:
         Atomically store a fraud result only when its
         transaction reference does not already exist.
 
-        The decision snapshot is persisted alongside the
-        fraud result without changing the FraudResult domain
-        model.
-
         Returns:
             True if this request created the result.
             False if another request already created it.
         """
-        connection = None
-        cursor = None
+        item = self._result_with_decision_item(
+            result,
+            decision,
+        )
 
         try:
-            connection = self._get_connection()
-            cursor = connection.cursor()
-
-            cursor.execute(
-                """
-                INSERT INTO fraud_results (
-                    transaction_reference,
-                    risk_score,
-                    risk_level,
-                    is_fraud,
-                    reasons,
-                    evaluated_at,
-                    decision,
-                    decision_reason,
-                    decision_risk_score,
-                    decision_risk_level,
-                    decision_is_fraud,
-                    velocity_violation
-                )
-                VALUES (
-                    %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s
-                )
-                ON CONFLICT (
-                    transaction_reference
-                ) DO NOTHING
-                RETURNING transaction_reference
-                """,
-                (
-                    result.transaction_reference,
-                    result.risk_score,
-                    result.risk_level,
-                    result.is_fraud,
-                    result.reasons,
-                    result.evaluated_at,
-                    decision["decision"],
-                    decision["decision_reason"],
-                    decision["risk_score"],
-                    decision["risk_level"],
-                    decision["is_fraud"],
-                    decision["velocity_violation"],
+            self.table.put_item(
+                Item=item,
+                ConditionExpression=(
+                    "attribute_not_exists("
+                    "transaction_reference)"
                 ),
             )
-
-            inserted_row = cursor.fetchone()
-            connection.commit()
-
-            if inserted_row is None:
-                logger.info(
-                    "Fraud result already exists: %s",
-                    result.transaction_reference,
-                )
-                return False
 
             logger.info(
                 "Fraud result atomically stored: %s",
                 result.transaction_reference,
             )
+
             return True
 
-        except Exception:
-            if connection is not None:
-                connection.rollback()
+        except ClientError as exc:
+            error_code = exc.response.get(
+                "Error",
+                {},
+            ).get("Code")
+
+            if (
+                error_code
+                == "ConditionalCheckFailedException"
+            ):
+                logger.info(
+                    "Fraud result already exists: %s",
+                    result.transaction_reference,
+                )
+
+                return False
 
             logger.exception(
                 "Failed to atomically store fraud result: %s",
@@ -379,35 +381,41 @@ class FraudRepository:
             )
             raise
 
-        finally:
-            if cursor is not None:
-                cursor.close()
-            if connection is not None:
-                connection.close()
+        except Exception:
+            logger.exception(
+                "Failed to atomically store fraud result: %s",
+                result.transaction_reference,
+            )
+            raise
 
     def count_results(self) -> int:
         """
         Return the number of fraud evaluations stored.
+
+        DynamoDB scans are paginated, so all pages are counted.
         """
-        connection = None
-        cursor = None
+        total = 0
+        scan_kwargs = {}
 
-        try:
-            connection = self._get_connection()
-            cursor = connection.cursor()
-
-            cursor.execute(
-                """
-                SELECT COUNT(*)
-                FROM fraud_results
-                """
+        while True:
+            response = self.table.scan(
+                **scan_kwargs
             )
 
-            row = cursor.fetchone()
-            return int(row[0])
+            total += int(
+                response.get("Count", 0)
+            )
 
-        finally:
-            if cursor is not None:
-                cursor.close()
-            if connection is not None:
-                connection.close()
+            last_evaluated_key = response.get(
+                "LastEvaluatedKey"
+            )
+
+            if not last_evaluated_key:
+                break
+
+            scan_kwargs = {
+                "ExclusiveStartKey":
+                    last_evaluated_key
+            }
+
+        return total

@@ -1,24 +1,14 @@
-
 version = 0.1
 
 [default.deploy.parameters]
-
 stack_name = "sentineliq"
-
 resolve_s3 = true
-
-s3_prefix = "sentineliq-fraud-detection"
-
+s3_prefix = "sentineliq"
 region = "eu-west-1"
-
 confirm_changeset = true
-
 capabilities = "CAPABILITY_IAM"
-
-parameter_overrides = "DBSecretArn=\"arn:aws:secretsmanager:eu-west-1:619240106198:secret:sentineliq/rds/postgres-KjWwNH\" ApiAuthSecretArn=\"arn:aws:secretsmanager:eu-west-1:619240106198:secret:sentineliq/api/auth-ZN9GWU\""
-
+parameter_overrides = "ApiAuthSecretArn=\"arn:aws:secretsmanager:eu-west-1:619240106198:secret:sentineliq/api/auth-ZN9GWU\""
 image_repositories = []
 
 [default.global.parameters]
-
 region = "eu-west-1"

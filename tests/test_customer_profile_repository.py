@@ -1,8 +1,9 @@
-import json
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from decimal import Decimal
+from unittest.mock import MagicMock
 
 import pytest
+from botocore.exceptions import ClientError
 
 from src.models.customer_profile import CustomerProfile
 from src.repositories.customer_profile_repository import (
@@ -10,449 +11,489 @@ from src.repositories.customer_profile_repository import (
 )
 
 
-@pytest.fixture
-def secrets_client():
-    return MagicMock()
-
-
-@pytest.fixture
-def repository(secrets_client):
-    return CustomerProfileRepository(
-        secret_name="test/secret",
-        db_host="localhost",
-        db_port="5432",
-        db_name="fintech_fraud",
-        secrets_client=secrets_client,
+def make_repository():
+    repository = CustomerProfileRepository.__new__(
+        CustomerProfileRepository
     )
 
+    repository.region_name = "eu-west-1"
+    repository.table_name = "CustomerProfiles"
+    repository.dynamodb = MagicMock()
+    repository.table = MagicMock()
 
-@pytest.fixture
-def profile():
+    return repository
+
+
+def make_profile():
     return CustomerProfile(
         customer_id=1001,
-        first_seen=datetime(2026, 9, 1, 10, 0, tzinfo=UTC),
-        last_seen=datetime(2026, 9, 14, 15, 30, tzinfo=UTC),
-        total_transactions=3,
-        total_amount=450.75,
-        average_amount=150.25,
-        highest_amount=250.00,
-        lowest_amount=75.75,
-        failed_transactions=1,
-        successful_transactions=2,
-        known_devices=["mobile", "web"],
+        first_seen=datetime(
+            2026,
+            9,
+            20,
+            10,
+            0,
+            tzinfo=UTC,
+        ),
+        last_seen=datetime(
+            2026,
+            9,
+            22,
+            15,
+            30,
+            tzinfo=UTC,
+        ),
+        total_transactions=12,
+        total_amount=15000.50,
+        average_amount=1250.0416666667,
+        highest_amount=5000.75,
+        lowest_amount=50.25,
+        failed_transactions=2,
+        successful_transactions=10,
+        known_devices=["iPhone", "Android"],
         known_locations=["Lagos", "Abuja"],
-        known_payment_methods=["card", "bank_transfer"],
+        known_payment_methods=["CARD", "TRANSFER"],
         known_merchants=["Merchant A", "Merchant B"],
         known_ips=["10.0.0.1", "10.0.0.2"],
         recent_transactions=[
             {
-                "transaction_reference": "TXN-001",
-                "amount": 100.0,
-            },
-            {
-                "transaction_reference": "TXN-002",
-                "amount": 200.0,
-            },
-        ],
-    )
-
-
-def test_get_postgres_connection_uses_secret_credentials(
-    repository,
-    secrets_client,
-):
-    secrets_client.get_secret_value.return_value = {
-        "SecretString": json.dumps(
-            {
-                "username": "postgres_user",
-                "password": "postgres_password",
-            }
-        )
-    }
-
-    fake_connection = MagicMock()
-
-    with patch(
-        "src.repositories.customer_profile_repository.psycopg2.connect",
-        return_value=fake_connection,
-    ) as connect_mock:
-        result = repository.get_postgres_connection()
-
-    assert result is fake_connection
-
-    secrets_client.get_secret_value.assert_called_once_with(
-        SecretId="test/secret"
-    )
-
-    connect_mock.assert_called_once_with(
-        host="localhost",
-        port="5432",
-        dbname="fintech_fraud",
-        user="postgres_user",
-        password="postgres_password",
-        connect_timeout=10,
-    )
-
-
-def test_get_postgres_connection_rejects_missing_secret_string(
-    repository,
-    secrets_client,
-):
-    secrets_client.get_secret_value.return_value = {}
-
-    with pytest.raises(
-        ValueError,
-        match="Secrets Manager secret does not contain SecretString",
-    ):
-        repository.get_postgres_connection()
-
-
-def test_get_postgres_connection_rejects_missing_credentials(
-    repository,
-    secrets_client,
-):
-    secrets_client.get_secret_value.return_value = {
-        "SecretString": json.dumps(
-            {
-                "username": "postgres_user",
-            }
-        )
-    }
-
-    with pytest.raises(
-        ValueError,
-        match="PostgreSQL credentials missing from Secrets Manager secret",
-    ):
-        repository.get_postgres_connection()
-
-
-def test_get_postgres_connection_requires_db_host(secrets_client):
-    secrets_client.get_secret_value.return_value = {
-        "SecretString": json.dumps(
-            {
-                "username": "postgres_user",
-                "password": "postgres_password",
-            }
-        )
-    }
-
-    with patch.dict("os.environ", {}, clear=True):
-        repository = CustomerProfileRepository(
-            secret_name="test/secret",
-            db_host=None,
-            db_name="fintech_fraud",
-            secrets_client=secrets_client,
-        )
-
-        with pytest.raises(
-            ValueError,
-            match="DB_HOST environment variable is required",
-        ):
-            repository.get_postgres_connection()
-
-
-def test_get_postgres_connection_requires_db_name(secrets_client):
-    secrets_client.get_secret_value.return_value = {
-        "SecretString": json.dumps(
-            {
-                "username": "postgres_user",
-                "password": "postgres_password",
-            }
-        )
-    }
-
-    with patch.dict("os.environ", {}, clear=True):
-        repository = CustomerProfileRepository(
-            secret_name="test/secret",
-            db_host="localhost",
-            db_name=None,
-            secrets_client=secrets_client,
-        )
-
-        with pytest.raises(
-            ValueError,
-            match="DB_NAME environment variable is required",
-        ):
-            repository.get_postgres_connection()
-
-
-def test_get_profile_returns_none_when_customer_does_not_exist(
-    repository,
-):
-    fake_connection = MagicMock()
-    fake_cursor = MagicMock()
-    fake_cursor.fetchone.return_value = None
-
-    fake_connection.cursor.return_value.__enter__.return_value = fake_cursor
-
-    with patch.object(
-        repository,
-        "get_postgres_connection",
-        return_value=fake_connection,
-    ):
-        result = repository.get_profile(9999)
-
-    assert result is None
-    fake_cursor.execute.assert_called_once()
-    fake_connection.close.assert_called_once()
-
-
-def test_get_profile_reconstructs_customer_profile(repository):
-    fake_connection = MagicMock()
-    fake_cursor = MagicMock()
-
-    row = (
-        1001,
-        datetime(2026, 9, 1, 10, 0, tzinfo=UTC),
-        datetime(2026, 9, 14, 15, 30, tzinfo=UTC),
-        3,
-        450.75,
-        150.25,
-        250.0,
-        75.75,
-        1,
-        2,
-        ["mobile", "web"],
-        ["Lagos", "Abuja"],
-        ["card", "bank_transfer"],
-        ["Merchant A", "Merchant B"],
-        ["10.0.0.1", "10.0.0.2"],
-        [
-            {
-                "transaction_reference": "TXN-001",
-                "amount": 100.0,
+                "transaction_reference": "TX-001",
+                "amount": 500.50,
+                "merchant_name": "Merchant A",
+                "merchant_category": "Retail",
+                "transaction_time": (
+                    "2026-09-22T15:30:00+00:00"
+                ),
+                "device_type": "iPhone",
+                "location": "Lagos",
+                "ip_address": "10.0.0.1",
+                "payment_method": "CARD",
+                "status": "APPROVED",
             }
         ],
     )
 
-    fake_cursor.fetchone.return_value = row
-    fake_connection.cursor.return_value.__enter__.return_value = fake_cursor
 
-    with patch.object(
-        repository,
-        "get_postgres_connection",
-        return_value=fake_connection,
-    ):
-        result = repository.get_profile(1001)
-
-    assert isinstance(result, CustomerProfile)
-    assert result.customer_id == 1001
-    assert result.first_seen == datetime(
-        2026, 9, 1, 10, 0, tzinfo=UTC
-    )
-    assert result.last_seen == datetime(
-        2026, 9, 14, 15, 30, tzinfo=UTC
-    )
-    assert result.total_transactions == 3
-    assert result.total_amount == 450.75
-    assert result.average_amount == 150.25
-    assert result.highest_amount == 250.0
-    assert result.lowest_amount == 75.75
-    assert result.failed_transactions == 1
-    assert result.successful_transactions == 2
-    assert result.known_devices == ["mobile", "web"]
-    assert result.known_locations == ["Lagos", "Abuja"]
-    assert result.known_payment_methods == ["card", "bank_transfer"]
-    assert result.known_merchants == ["Merchant A", "Merchant B"]
-    assert result.known_ips == ["10.0.0.1", "10.0.0.2"]
-    assert result.recent_transactions == [
+def conditional_failure():
+    return ClientError(
         {
-            "transaction_reference": "TXN-001",
-            "amount": 100.0,
-        }
+            "Error": {
+                "Code": "ConditionalCheckFailedException",
+                "Message": "Conditional request failed",
+            }
+        },
+        "PutItem",
+    )
+
+
+def test_repository_uses_default_region_and_table(monkeypatch):
+    monkeypatch.delenv(
+        "AWS_REGION_NAME",
+        raising=False,
+    )
+    monkeypatch.delenv(
+        "CUSTOMER_PROFILES_TABLE",
+        raising=False,
+    )
+
+    mock_resource = MagicMock()
+
+    monkeypatch.setattr(
+        "src.repositories.customer_profile_repository.boto3.resource",
+        mock_resource,
+    )
+
+    repository = CustomerProfileRepository()
+
+    assert repository.region_name == "eu-west-1"
+    assert repository.table_name == "CustomerProfiles"
+
+    mock_resource.assert_called_once_with(
+        "dynamodb",
+        region_name="eu-west-1",
+    )
+
+
+def test_repository_uses_environment_configuration(monkeypatch):
+    monkeypatch.setenv(
+        "AWS_REGION_NAME",
+        "us-east-1",
+    )
+    monkeypatch.setenv(
+        "CUSTOMER_PROFILES_TABLE",
+        "CustomCustomerProfiles",
+    )
+
+    mock_resource = MagicMock()
+
+    monkeypatch.setattr(
+        "src.repositories.customer_profile_repository.boto3.resource",
+        mock_resource,
+    )
+
+    repository = CustomerProfileRepository()
+
+    assert repository.region_name == "us-east-1"
+    assert repository.table_name == (
+        "CustomCustomerProfiles"
+    )
+
+    mock_resource.assert_called_once_with(
+        "dynamodb",
+        region_name="us-east-1",
+    )
+
+
+def test_profile_item_converts_numeric_values_to_decimal():
+    repository = make_repository()
+    profile = make_profile()
+
+    item = repository._profile_item(profile)
+
+    assert item["customer_id"] == 1001
+    assert item["total_transactions"] == 12
+    assert item["failed_transactions"] == 2
+    assert item["successful_transactions"] == 10
+
+    assert item["total_amount"] == Decimal(
+        "15000.5"
+    )
+    assert item["average_amount"] == Decimal(
+        "1250.0416666667"
+    )
+    assert item["highest_amount"] == Decimal(
+        "5000.75"
+    )
+    assert item["lowest_amount"] == Decimal(
+        "50.25"
+    )
+
+
+def test_profile_item_serializes_datetimes_to_utc_iso():
+    repository = make_repository()
+    profile = make_profile()
+
+    item = repository._profile_item(profile)
+
+    assert item["first_seen"] == (
+        "2026-09-20T10:00:00+00:00"
+    )
+    assert item["last_seen"] == (
+        "2026-09-22T15:30:00+00:00"
+    )
+
+
+def test_profile_item_normalizes_non_utc_datetime():
+    repository = make_repository()
+
+    profile = CustomerProfile(
+        customer_id=1001,
+        first_seen=datetime.fromisoformat(
+            "2026-09-22T18:30:00+01:00"
+        ),
+        last_seen=datetime.fromisoformat(
+            "2026-09-22T18:30:00+01:00"
+        ),
+    )
+
+    item = repository._profile_item(profile)
+
+    assert item["first_seen"] == (
+        "2026-09-22T17:30:00+00:00"
+    )
+    assert item["last_seen"] == (
+        "2026-09-22T17:30:00+00:00"
+    )
+
+
+def test_profile_item_serializes_recent_transaction_amount():
+    repository = make_repository()
+    profile = make_profile()
+
+    item = repository._profile_item(profile)
+
+    recent = item["recent_transactions"][0]
+
+    assert recent["transaction_reference"] == "TX-001"
+    assert recent["amount"] == Decimal("500.5")
+
+
+def test_item_to_profile_reconstructs_complete_profile():
+    repository = make_repository()
+    profile = make_profile()
+
+    item = repository._profile_item(profile)
+
+    reconstructed = repository._item_to_profile(item)
+
+    assert reconstructed.customer_id == 1001
+    assert reconstructed.first_seen == profile.first_seen
+    assert reconstructed.last_seen == profile.last_seen
+
+    assert reconstructed.total_transactions == 12
+    assert reconstructed.total_amount == 15000.50
+    assert reconstructed.average_amount == (
+        1250.0416666667
+    )
+    assert reconstructed.highest_amount == 5000.75
+    assert reconstructed.lowest_amount == 50.25
+
+    assert reconstructed.failed_transactions == 2
+    assert reconstructed.successful_transactions == 10
+
+    assert reconstructed.known_devices == [
+        "iPhone",
+        "Android",
     ]
 
-    fake_connection.close.assert_called_once()
+    assert reconstructed.known_locations == [
+        "Lagos",
+        "Abuja",
+    ]
+
+    assert reconstructed.known_payment_methods == [
+        "CARD",
+        "TRANSFER",
+    ]
+
+    assert reconstructed.known_merchants == [
+        "Merchant A",
+        "Merchant B",
+    ]
+
+    assert reconstructed.known_ips == [
+        "10.0.0.1",
+        "10.0.0.2",
+    ]
+
+    assert len(
+        reconstructed.recent_transactions
+    ) == 1
 
 
-def test_create_profile_inserts_default_profile(repository):
-    fake_connection = MagicMock()
-    fake_cursor = MagicMock()
+def test_item_to_profile_handles_missing_optional_fields():
+    repository = make_repository()
 
-    fake_connection.cursor.return_value.__enter__.return_value = fake_cursor
+    profile = repository._item_to_profile(
+        {
+            "customer_id": 1001,
+        }
+    )
 
-    with patch.object(
-        repository,
-        "get_postgres_connection",
-        return_value=fake_connection,
-    ):
-        result = repository.create_profile(1001)
+    assert profile.customer_id == 1001
+    assert profile.first_seen is None
+    assert profile.last_seen is None
+    assert profile.total_transactions == 0
+    assert profile.total_amount == 0
+    assert profile.average_amount == 0
+    assert profile.highest_amount == 0
+    assert profile.lowest_amount == 0
+    assert profile.failed_transactions == 0
+    assert profile.successful_transactions == 0
+    assert profile.known_devices == []
+    assert profile.known_locations == []
+    assert profile.known_payment_methods == []
+    assert profile.known_merchants == []
+    assert profile.known_ips == []
+    assert profile.recent_transactions == []
 
-    assert isinstance(result, CustomerProfile)
+
+def test_get_profile_returns_profile_when_item_exists():
+    repository = make_repository()
+    profile = make_profile()
+
+    repository.table.get_item.return_value = {
+        "Item": repository._profile_item(profile)
+    }
+
+    result = repository.get_profile(1001)
+
+    repository.table.get_item.assert_called_once_with(
+        Key={"customer_id": 1001}
+    )
+
     assert result.customer_id == 1001
-    assert result.total_transactions == 0
-    assert result.total_amount == 0.0
-    assert result.average_amount == 0.0
-    assert result.highest_amount == 0.0
-    assert result.lowest_amount == 0.0
-    assert result.failed_transactions == 0
-    assert result.successful_transactions == 0
-    assert result.known_devices == []
-    assert result.known_locations == []
-    assert result.known_payment_methods == []
-    assert result.known_merchants == []
-    assert result.known_ips == []
-    assert result.recent_transactions == []
-
-    fake_cursor.execute.assert_called_once()
-
-    sql, params = fake_cursor.execute.call_args.args
-
-    normalized_sql = " ".join(sql.split())
-
-    assert "INSERT INTO customers" in normalized_sql
-    assert "ON CONFLICT (customer_id) DO NOTHING" in normalized_sql
-    assert params[0] == 1001
-
-    fake_connection.close.assert_called_once()
 
 
-def test_save_writes_complete_profile_as_upsert(
-    repository,
-    profile,
-):
-    fake_connection = MagicMock()
-    fake_cursor = MagicMock()
+def test_get_profile_returns_none_when_item_missing():
+    repository = make_repository()
 
-    fake_connection.cursor.return_value.__enter__.return_value = fake_cursor
+    repository.table.get_item.return_value = {}
 
-    with patch.object(
-        repository,
-        "get_postgres_connection",
-        return_value=fake_connection,
-    ):
-        repository.save(profile)
+    result = repository.get_profile(1001)
 
-    fake_cursor.execute.assert_called_once()
+    assert result is None
 
-    sql, params = fake_cursor.execute.call_args.args
-
-    normalized_sql = " ".join(sql.split())
-
-    assert "INSERT INTO customers" in normalized_sql
-    assert "ON CONFLICT (customer_id) DO UPDATE SET" in normalized_sql
-    assert "first_seen = EXCLUDED.first_seen" in normalized_sql
-    assert "last_seen = EXCLUDED.last_seen" in normalized_sql
-    assert "total_transactions = EXCLUDED.total_transactions" in normalized_sql
-    assert "total_amount = EXCLUDED.total_amount" in normalized_sql
-    assert "average_amount = EXCLUDED.average_amount" in normalized_sql
-    assert "highest_amount = EXCLUDED.highest_amount" in normalized_sql
-    assert "lowest_amount = EXCLUDED.lowest_amount" in normalized_sql
-    assert "failed_transactions = EXCLUDED.failed_transactions" in normalized_sql
-    assert (
-        "successful_transactions = EXCLUDED.successful_transactions"
-        in normalized_sql
-    )
-    assert "known_devices = EXCLUDED.known_devices" in normalized_sql
-    assert "known_locations = EXCLUDED.known_locations" in normalized_sql
-    assert (
-        "known_payment_methods = EXCLUDED.known_payment_methods"
-        in normalized_sql
-    )
-    assert "known_merchants = EXCLUDED.known_merchants" in normalized_sql
-    assert "known_ips = EXCLUDED.known_ips" in normalized_sql
-    assert (
-        "recent_transactions = EXCLUDED.recent_transactions"
-        in normalized_sql
+    repository.table.get_item.assert_called_once_with(
+        Key={"customer_id": 1001}
     )
 
-    assert params[0] == 1001
-    assert params[1] == profile.first_seen
-    assert params[2] == profile.last_seen
-    assert params[3] == 3
 
-    assert params[4] == profile.total_amount
-    assert params[5] == profile.average_amount
-    assert params[6] == profile.highest_amount
-    assert params[7] == profile.lowest_amount
+def test_get_profile_converts_customer_id_to_integer():
+    repository = make_repository()
 
-    assert params[8] == 1
-    assert params[9] == 2
+    repository.table.get_item.return_value = {
+        "Item": {
+            "customer_id": Decimal("1001"),
+        }
+    }
 
-    assert params[10].adapted == profile.known_devices
-    assert params[11].adapted == profile.known_locations
-    assert params[12].adapted == profile.known_payment_methods
-    assert params[13].adapted == profile.known_merchants
-    assert params[14].adapted == profile.known_ips
-    assert params[15].adapted == profile.recent_transactions
+    result = repository.get_profile("1001")
 
-    fake_connection.close.assert_called_once()
+    assert result.customer_id == 1001
 
 
-def test_get_or_create_returns_existing_profile(
-    repository,
-    profile,
-):
-    with patch.object(
-        repository,
-        "get_profile",
-        return_value=profile,
-    ) as get_profile_mock, patch.object(
-        repository,
-        "create_profile",
-    ) as create_profile_mock:
-        result = repository.get_or_create(1001)
+def test_create_profile_writes_empty_profile():
+    repository = make_repository()
+
+    result = repository.create_profile(1001)
+
+    repository.table.put_item.assert_called_once()
+
+    call_kwargs = (
+        repository.table.put_item.call_args.kwargs
+    )
+
+    assert call_kwargs["Item"]["customer_id"] == 1001
+    assert call_kwargs["Item"]["total_transactions"] == 0
+    assert call_kwargs["Item"]["total_amount"] == Decimal(
+        "0.0"
+    )
+    assert call_kwargs["Item"]["average_amount"] == Decimal(
+        "0.0"
+    )
+    assert call_kwargs["Item"]["known_devices"] == []
+    assert call_kwargs["Item"]["recent_transactions"] == []
+
+    assert call_kwargs["ConditionExpression"] == (
+        "attribute_not_exists(customer_id)"
+    )
+
+    assert result.customer_id == 1001
+
+
+def test_create_profile_returns_existing_profile_on_race():
+    repository = make_repository()
+
+    existing = make_profile()
+
+    repository.table.put_item.side_effect = (
+        conditional_failure()
+    )
+
+    repository.table.get_item.return_value = {
+        "Item": repository._profile_item(existing)
+    }
+
+    result = repository.create_profile(1001)
+
+    assert result.customer_id == 1001
+    assert result.total_transactions == 12
+
+    repository.table.get_item.assert_called_once_with(
+        Key={"customer_id": 1001}
+    )
+
+
+def test_create_profile_reraises_conditional_failure_if_profile_missing():
+    repository = make_repository()
+
+    repository.table.put_item.side_effect = (
+        conditional_failure()
+    )
+
+    repository.table.get_item.return_value = {}
+
+    with pytest.raises(ClientError):
+        repository.create_profile(1001)
+
+
+def test_create_profile_reraises_unexpected_client_error():
+    repository = make_repository()
+
+    repository.table.put_item.side_effect = ClientError(
+        {
+            "Error": {
+                "Code": "ProvisionedThroughputExceededException",
+                "Message": "Capacity exceeded",
+            }
+        },
+        "PutItem",
+    )
+
+    with pytest.raises(ClientError):
+        repository.create_profile(1001)
+
+
+def test_save_writes_complete_profile():
+    repository = make_repository()
+    profile = make_profile()
+
+    result = repository.save(profile)
+
+    repository.table.put_item.assert_called_once()
+
+    call_kwargs = (
+        repository.table.put_item.call_args.kwargs
+    )
+
+    assert call_kwargs["Item"] == (
+        repository._profile_item(profile)
+    )
 
     assert result is profile
-    get_profile_mock.assert_called_once_with(1001)
-    create_profile_mock.assert_not_called()
 
 
-def test_get_or_create_creates_missing_profile(repository):
-    created_profile = CustomerProfile(customer_id=1001)
+def test_save_propagates_dynamodb_errors():
+    repository = make_repository()
+    profile = make_profile()
 
-    with patch.object(
-        repository,
-        "get_profile",
-        return_value=None,
-    ) as get_profile_mock, patch.object(
-        repository,
-        "create_profile",
-        return_value=created_profile,
-    ) as create_profile_mock:
-        result = repository.get_or_create(1001)
+    repository.table.put_item.side_effect = RuntimeError(
+        "DynamoDB unavailable"
+    )
 
-    assert result is created_profile
-    get_profile_mock.assert_called_once_with(1001)
-    create_profile_mock.assert_called_once_with(1001)
+    with pytest.raises(RuntimeError):
+        repository.save(profile)
 
 
-def test_save_closes_connection_when_database_error_occurs(
-    repository,
-    profile,
-):
-    fake_connection = MagicMock()
-    fake_cursor = MagicMock()
-    fake_cursor.execute.side_effect = RuntimeError("database failure")
+def test_get_or_create_returns_existing_profile():
+    repository = make_repository()
+    profile = make_profile()
 
-    fake_connection.cursor.return_value.__enter__.return_value = fake_cursor
+    repository.table.get_item.return_value = {
+        "Item": repository._profile_item(profile)
+    }
 
-    with patch.object(
-        repository,
-        "get_postgres_connection",
-        return_value=fake_connection,
-    ):
-        with pytest.raises(RuntimeError, match="database failure"):
-            repository.save(profile)
+    result = repository.get_or_create(1001)
 
-    fake_connection.close.assert_called_once()
+    assert result.customer_id == 1001
+    assert result.total_transactions == 12
+
+    repository.table.put_item.assert_not_called()
 
 
-def test_get_profile_closes_connection_when_database_error_occurs(
-    repository,
-):
-    fake_connection = MagicMock()
-    fake_cursor = MagicMock()
-    fake_cursor.execute.side_effect = RuntimeError("database failure")
+def test_get_or_create_creates_missing_profile():
+    repository = make_repository()
 
-    fake_connection.cursor.return_value.__enter__.return_value = fake_cursor
+    repository.table.get_item.return_value = {}
 
-    with patch.object(
-        repository,
-        "get_postgres_connection",
-        return_value=fake_connection,
-    ):
-        with pytest.raises(RuntimeError, match="database failure"):
-            repository.get_profile(1001)
+    result = repository.get_or_create(1001)
 
-    fake_connection.close.assert_called_once()
+    assert result.customer_id == 1001
+
+    repository.table.get_item.assert_called_once_with(
+        Key={"customer_id": 1001}
+    )
+
+    repository.table.put_item.assert_called_once()
+
+
+def test_get_profile_propagates_dynamodb_error():
+    repository = make_repository()
+
+    repository.table.get_item.side_effect = RuntimeError(
+        "DynamoDB unavailable"
+    )
+
+    with pytest.raises(RuntimeError):
+        repository.get_profile(1001)

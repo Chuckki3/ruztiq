@@ -1,27 +1,18 @@
 AWSTemplateFormatVersion: '2010-09-09'
-
 Transform: AWS::Serverless-2016-10-31
 
 Description: >
-
   RuztIQ serverless fraud detection pipeline.
-
-  Exposes a fraud scoring API through API Gateway
-
-  and processes transactions with Lambda and PostgreSQL.
+  Exposes a fraud scoring API through API Gateway and Lambda,
+  with DynamoDB-backed transaction, customer profile, and fraud
+  result persistence.
 
 Parameters:
-
-  DBSecretArn:
-    Type: String
-    Description: ARN of the PostgreSQL database secret in AWS Secrets Manager
-
   ApiAuthSecretArn:
     Type: String
     Description: ARN of the RuztIQ API authentication secret in AWS Secrets Manager
 
 Globals:
-
   Api:
     Auth:
       Authorizers:
@@ -31,57 +22,104 @@ Globals:
           Identity:
             Headers:
               - Authorization
-
     MethodSettings:
       - ResourcePath: /score
         HttpMethod: POST
         ThrottlingRateLimit: 20
         ThrottlingBurstLimit: 40
 
-
 Resources:
+
+  TransactionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: Transactions
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: customer_id
+          AttributeType: N
+        - AttributeName: transaction_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: customer_id
+          KeyType: HASH
+        - AttributeName: transaction_key
+          KeyType: RANGE
+      Tags:
+        - Key: Project
+          Value: RuztIQ
+        - Key: Component
+          Value: Transactions
+
+  CustomerProfilesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: CustomerProfiles
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: customer_id
+          AttributeType: N
+      KeySchema:
+        - AttributeName: customer_id
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: RuztIQ
+        - Key: Component
+          Value: CustomerProfiles
+
+  FraudResultsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: FraudResults
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: transaction_reference
+          AttributeType: S
+      KeySchema:
+        - AttributeName: transaction_reference
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: RuztIQ
+        - Key: Component
+          Value: FraudResults
 
   RuztIQApiAuthorizerFunction:
     Type: AWS::Serverless::Function
-
     Properties:
       CodeUri: ..
       Handler: src/lambda_function/authorizer.lambda_handler
       Runtime: python3.11
       Timeout: 10
       MemorySize: 128
-
       Policies:
         - AWSLambdaBasicExecutionRole
-
         - Statement:
             - Effect: Allow
               Action:
                 - secretsmanager:GetSecretValue
               Resource:
                 - !Ref ApiAuthSecretArn
-
       Environment:
         Variables:
           AWS_REGION_NAME: !Ref AWS::Region
           API_AUTH_SECRET_NAME: sentineliq/api/auth
 
-
   FraudDetectionFunction:
     Type: AWS::Serverless::Function
-
     Properties:
       CodeUri: ..
       Handler: src/lambda_function/handler.lambda_handler
       Runtime: python3.11
       Timeout: 60
       MemorySize: 256
-
-      VpcConfig:
-        SecurityGroupIds:
-          - sg-028fe4b2505cf5132
-        SubnetIds:
-          - subnet-0a08dd16941d5025e
 
       Events:
         ScoreTransaction:
@@ -95,14 +133,17 @@ Resources:
       Policies:
         - AWSLambdaBasicExecutionRole
 
-        - AWSLambdaVPCAccessExecutionRole
-
         - Statement:
             - Effect: Allow
               Action:
-                - secretsmanager:GetSecretValue
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:Query
+                - dynamodb:Scan
               Resource:
-                - !Ref DBSecretArn
+                - !GetAtt TransactionsTable.Arn
+                - !GetAtt CustomerProfilesTable.Arn
+                - !GetAtt FraudResultsTable.Arn
 
         - Statement:
             - Effect: Allow
@@ -113,157 +154,117 @@ Resources:
       Environment:
         Variables:
           AWS_REGION_NAME: !Ref AWS::Region
-          DB_SECRET_NAME: sentineliq/rds/postgres
-          DB_HOST: sentineliq-postgres.clsq8ogwm7qk.eu-west-1.rds.amazonaws.com
-          DB_PORT: '5432'
-          DB_NAME: fintech_fraud
-
+          TRANSACTIONS_TABLE: !Ref TransactionsTable
+          CUSTOMER_PROFILES_TABLE: !Ref CustomerProfilesTable
+          FRAUD_RESULTS_TABLE: !Ref FraudResultsTable
 
   FraudDetectionFunctionErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
-
     Properties:
-      AlarmDescription: >
-        Alerts when the RuztIQ fraud detection Lambda records one or more errors.
-
+      AlarmName: !Sub "${AWS::StackName}-FraudDetectionFunction-Errors"
+      AlarmDescription: Alerts when the fraud detection Lambda reports errors.
       Namespace: AWS/Lambda
       MetricName: Errors
-
       Dimensions:
         - Name: FunctionName
           Value: !Ref FraudDetectionFunction
-
       Statistic: Sum
       Period: 300
       EvaluationPeriods: 1
-      DatapointsToAlarm: 1
       Threshold: 1
-
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
-
 
   FraudDetectionFunctionThrottlesAlarm:
     Type: AWS::CloudWatch::Alarm
-
     Properties:
-      AlarmDescription: >
-        Alerts when the RuztIQ fraud detection Lambda is throttled.
-
+      AlarmName: !Sub "${AWS::StackName}-FraudDetectionFunction-Throttles"
+      AlarmDescription: Alerts when the fraud detection Lambda is throttled.
       Namespace: AWS/Lambda
       MetricName: Throttles
-
       Dimensions:
         - Name: FunctionName
           Value: !Ref FraudDetectionFunction
-
       Statistic: Sum
       Period: 300
       EvaluationPeriods: 1
-      DatapointsToAlarm: 1
       Threshold: 1
-
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
-
 
   ApiGateway5XXAlarm:
     Type: AWS::CloudWatch::Alarm
-
     Properties:
-      AlarmDescription: >
-        Alerts when the RuztIQ API Gateway records server-side 5XX errors.
-
+      AlarmName: !Sub "${AWS::StackName}-ApiGateway-5XX"
+      AlarmDescription: Alerts when API Gateway returns 5XX responses.
       Namespace: AWS/ApiGateway
       MetricName: 5XXError
-
       Dimensions:
         - Name: ApiName
-          Value: sentineliq
-
-        - Name: Stage
-          Value: Prod
-
+          Value: !Sub "${AWS::StackName}"
       Statistic: Sum
       Period: 300
       EvaluationPeriods: 1
-      DatapointsToAlarm: 1
       Threshold: 1
-
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
-
 
   ApiGateway4XXAlarm:
     Type: AWS::CloudWatch::Alarm
-
     Properties:
-      AlarmDescription: >
-        Alerts when the RuztIQ API Gateway records an elevated number
-        of client-side 4XX responses.
-
+      AlarmName: !Sub "${AWS::StackName}-ApiGateway-4XX"
+      AlarmDescription: Alerts when API Gateway returns 4XX responses.
       Namespace: AWS/ApiGateway
       MetricName: 4XXError
-
       Dimensions:
         - Name: ApiName
-          Value: sentineliq
-
-        - Name: Stage
-          Value: Prod
-
+          Value: !Sub "${AWS::StackName}"
       Statistic: Sum
       Period: 300
       EvaluationPeriods: 1
-      DatapointsToAlarm: 1
-      Threshold: 10
-
+      Threshold: 5
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
-
 
   ApiGatewayLatencyAlarm:
     Type: AWS::CloudWatch::Alarm
-
     Properties:
-      AlarmDescription: >
-        Alerts when average RuztIQ API Gateway latency reaches three seconds.
-
+      AlarmName: !Sub "${AWS::StackName}-ApiGateway-Latency"
+      AlarmDescription: Alerts when API Gateway latency becomes elevated.
       Namespace: AWS/ApiGateway
       MetricName: Latency
-
       Dimensions:
         - Name: ApiName
-          Value: sentineliq
-
-        - Name: Stage
-          Value: Prod
-
+          Value: !Sub "${AWS::StackName}"
       Statistic: Average
       Period: 300
-      EvaluationPeriods: 2
-      DatapointsToAlarm: 2
+      EvaluationPeriods: 1
       Threshold: 3000
-
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
 
-
 Outputs:
-
   ApiEndpoint:
     Description: RuztIQ Fraud Detection API Endpoint
     Value:
       !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/score"
 
-
   FraudDetectionFunctionArn:
-    Description: RuztIQ Fraud Detection Lambda ARN
-    Value:
-      !GetAtt FraudDetectionFunction.Arn
-
+    Description: RuztIQ fraud detection Lambda ARN
+    Value: !GetAtt FraudDetectionFunction.Arn
 
   RuztIQApiAuthorizerFunctionArn:
-    Description: RuztIQ API Lambda authorizer ARN
-    Value:
-      !GetAtt RuztIQApiAuthorizerFunction.Arn
+    Description: RuztIQ API authorizer Lambda ARN
+    Value: !GetAtt RuztIQApiAuthorizerFunction.Arn
+
+  TransactionsTableName:
+    Description: RuztIQ transactions DynamoDB table
+    Value: !Ref TransactionsTable
+
+  CustomerProfilesTableName:
+    Description: RuztIQ customer profiles DynamoDB table
+    Value: !Ref CustomerProfilesTable
+
+  FraudResultsTableName:
+    Description: RuztIQ fraud results DynamoDB table
+    Value: !Ref FraudResultsTable

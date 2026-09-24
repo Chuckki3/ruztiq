@@ -1,179 +1,216 @@
 import os
+import random
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import boto3
-import psycopg2
 
 from src.models.transaction import Transaction
 
 
 class TransactionRepository:
     """
-    PostgreSQL-backed repository for RuztIQ transaction persistence
+    DynamoDB-backed repository for RuztIQ transaction persistence
     and behavioural transaction-history queries.
+
+    Transactions are partitioned by customer_id and ordered by a
+    composite transaction key:
+
+        <UTC timestamp ISO8601>#<transaction reference>
+
+    This preserves multiple transactions occurring at the same
+    timestamp while keeping time-range queries efficient.
     """
 
     def __init__(self):
-        self.secret_name = os.getenv(
-            "DB_SECRET_NAME",
-            "sentineliq/rds/postgres",
-        )
-        self.db_host = os.getenv("DB_HOST")
-        self.db_port = int(
-            os.getenv("DB_PORT", "5432")
-        )
-        self.db_name = os.getenv(
-            "DB_NAME",
-            "fintech_fraud",
-        )
         self.region_name = os.getenv(
             "AWS_REGION_NAME",
             "eu-west-1",
         )
+        self.table_name = os.getenv(
+            "TRANSACTIONS_TABLE",
+            "Transactions",
+        )
 
-        self.secrets_client = boto3.client(
-            "secretsmanager",
+        self.dynamodb = boto3.resource(
+            "dynamodb",
             region_name=self.region_name,
         )
-
-    def _get_connection(self):
-        """
-        Create a PostgreSQL connection using credentials
-        stored in AWS Secrets Manager.
-        """
-        response = self.secrets_client.get_secret_value(
-            SecretId=self.secret_name
-        )
-        secret = response["SecretString"]
-
-        import json
-
-        credentials = json.loads(secret)
-
-        return psycopg2.connect(
-            host=self.db_host,
-            port=self.db_port,
-            dbname=self.db_name,
-            user=credentials["username"],
-            password=credentials["password"],
-            connect_timeout=10,
-        )
+        self.table = self.dynamodb.Table(self.table_name)
 
     @staticmethod
     def _normalize_datetime(value):
-        """
-        Normalize timestamps to timezone-aware UTC datetimes.
-        """
         if value.tzinfo is None:
             return value.replace(tzinfo=UTC)
 
         return value.astimezone(UTC)
 
+    @classmethod
+    def _transaction_key(cls, transaction_time, transaction_reference):
+        normalized_time = cls._normalize_datetime(
+            transaction_time
+        )
+
+        return (
+            f"{normalized_time.isoformat()}"
+            f"#{transaction_reference}"
+        )
+
+    @staticmethod
+    def _parse_datetime(value):
+        if isinstance(value, datetime):
+            return TransactionRepository._normalize_datetime(value)
+
+        parsed = datetime.fromisoformat(str(value))
+
+        return TransactionRepository._normalize_datetime(parsed)
+
+    @staticmethod
+    def _item_to_transaction(item):
+        try:
+            historical_time = item.get("transaction_time")
+
+            if historical_time is None:
+                return None
+
+            historical_time = TransactionRepository._parse_datetime(
+                historical_time
+            )
+
+            amount = item.get("amount", 0)
+
+            if isinstance(amount, Decimal):
+                amount = float(amount)
+
+            return Transaction(
+                customer_id=int(item["customer_id"]),
+                transaction_reference=str(
+                    item["transaction_reference"]
+                ),
+                amount=float(amount),
+                merchant_name=str(
+                    item.get("merchant_name", "")
+                ),
+                merchant_category=str(
+                    item.get("merchant_category", "")
+                ),
+                payment_method=str(
+                    item.get("payment_method", "")
+                ),
+                device_type=str(
+                    item.get("device_type", "")
+                ),
+                transaction_time=historical_time,
+                location=str(item.get("location", "")),
+                ip_address=str(item.get("ip_address", "")),
+                status=str(
+                    item.get("status", "APPROVED")
+                ),
+            )
+
+        except (TypeError, ValueError, KeyError):
+            return None
+
     def insert_transaction(self, transaction):
         """
-        Persist a transaction to PostgreSQL.
+        Persist a transaction to DynamoDB.
         """
+
         transaction_time = self._normalize_datetime(
             transaction.transaction_time
         )
 
-        query = """
-            INSERT INTO transactions (
-                transaction_reference,
-                customer_id,
-                amount,
-                merchant_name,
-                merchant_category,
-                payment_method,
-                device_type,
+        item = {
+            "customer_id": int(transaction.customer_id),
+            "transaction_key": self._transaction_key(
                 transaction_time,
-                location,
-                ip_address,
-                status
-            )
-            VALUES (
-                %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s
-            )
-        """
+                transaction.transaction_reference,
+            ),
+            "transaction_reference": (
+                transaction.transaction_reference
+            ),
+            "amount": Decimal(
+                str(transaction.amount)
+            ),
+            "merchant_name": transaction.merchant_name,
+            "merchant_category": transaction.merchant_category,
+            "payment_method": transaction.payment_method,
+            "device_type": transaction.device_type,
+            "transaction_time": transaction_time.isoformat(),
+            "location": transaction.location,
+            "ip_address": transaction.ip_address,
+            "status": transaction.status,
+        }
 
-        params = (
-            transaction.transaction_reference,
-            transaction.customer_id,
-            Decimal(str(transaction.amount)),
-            transaction.merchant_name,
-            transaction.merchant_category,
-            transaction.payment_method,
-            transaction.device_type,
-            transaction_time,
-            transaction.location,
-            transaction.ip_address,
-            transaction.status,
-        )
-
-        connection = self._get_connection()
-
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute(query, params)
-
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        self.table.put_item(Item=item)
 
         return transaction.transaction_reference
 
     def count_transactions(self):
         """
-        Return the total number of persisted transactions.
-        """
-        query = """
-            SELECT COUNT(*)
-            FROM transactions
+        Return the total number of stored transactions.
+
+        DynamoDB Scan is paginated, so all pages are consumed.
         """
 
-        connection = self._get_connection()
+        total = 0
+        exclusive_start_key = None
 
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute(query)
-                row = cursor.fetchone()
+        while True:
+            kwargs = {}
 
-            return int(row[0])
-        finally:
-            connection.close()
+            if exclusive_start_key is not None:
+                kwargs["ExclusiveStartKey"] = exclusive_start_key
+
+            response = self.table.scan(**kwargs)
+
+            total += int(response.get("Count", 0))
+
+            exclusive_start_key = response.get(
+                "LastEvaluatedKey"
+            )
+
+            if exclusive_start_key is None:
+                break
+
+        return total
 
     def get_random_customer_id(self):
         """
-        Return a customer ID from the transactions table.
+        Return a customer ID from the transaction population.
 
-        This preserves the existing synthetic-data helper contract
-        while sourcing the value from PostgreSQL.
-        """
-        query = """
-            SELECT customer_id
-            FROM transactions
-            ORDER BY RANDOM()
-            LIMIT 1
+        A fallback of 1 is preserved for an empty transaction table.
         """
 
-        connection = self._get_connection()
+        response = self.table.scan(
+            ProjectionExpression="customer_id",
+        )
 
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute(query)
-                row = cursor.fetchone()
+        customer_ids = {
+            int(item["customer_id"])
+            for item in response.get("Items", [])
+            if item.get("customer_id") is not None
+        }
 
-            if row is None:
-                return 1
+        while response.get("LastEvaluatedKey"):
+            response = self.table.scan(
+                ProjectionExpression="customer_id",
+                ExclusiveStartKey=response[
+                    "LastEvaluatedKey"
+                ],
+            )
 
-            return int(row[0])
-        finally:
-            connection.close()
+            customer_ids.update(
+                int(item["customer_id"])
+                for item in response.get("Items", [])
+                if item.get("customer_id") is not None
+            )
+
+        if not customer_ids:
+            return 1
+
+        # Preserve the intent of the old random-selection method.
+        return random.choice(tuple(customer_ids))
 
     def get_recent_transactions(
         self,
@@ -182,12 +219,10 @@ class TransactionRepository:
         window_minutes=5,
     ):
         """
-        Retrieve historical transactions for a customer within
-        the configured velocity window.
-
-        PostgreSQL uses the existing
-        (customer_id, transaction_time) index.
+        Retrieve transactions for a customer within the preceding
+        time window, ordered chronologically.
         """
+
         transaction_time = self._normalize_datetime(
             transaction_time
         )
@@ -197,79 +232,35 @@ class TransactionRepository:
             - timedelta(minutes=window_minutes)
         )
 
-        query = """
-            SELECT
-                transaction_reference,
-                customer_id,
-                amount,
-                merchant_name,
-                merchant_category,
-                payment_method,
-                device_type,
-                transaction_time,
-                location,
-                ip_address,
-                status
-            FROM transactions
-            WHERE customer_id = %s
-              AND transaction_time BETWEEN %s AND %s
-            ORDER BY transaction_time
-        """
+        start_key = (
+            f"{window_start.isoformat()}#"
+        )
 
-        connection = self._get_connection()
+        end_key = (
+            f"{transaction_time.isoformat()}"
+            f"#\uffff"
+        )
 
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    query,
-                    (
-                        customer_id,
-                        window_start,
-                        transaction_time,
-                    ),
-                )
-                rows = cursor.fetchall()
-        finally:
-            connection.close()
+        response = self.table.query(
+            KeyConditionExpression=(
+                "customer_id = :customer_id "
+                "AND transaction_key BETWEEN "
+                ":start_key AND :end_key"
+            ),
+            ExpressionAttributeValues={
+                ":customer_id": int(customer_id),
+                ":start_key": start_key,
+                ":end_key": end_key,
+            },
+            ScanIndexForward=True,
+        )
 
         transactions = []
 
-        for row in rows:
-            try:
-                historical_time = row[7]
+        for item in response.get("Items", []):
+            transaction = self._item_to_transaction(item)
 
-                if historical_time is None:
-                    continue
-
-                historical_time = self._normalize_datetime(
-                    historical_time
-                )
-
-                amount = row[2]
-
-                if isinstance(amount, Decimal):
-                    amount = float(amount)
-
-                transaction = Transaction(
-                    customer_id=int(row[1]),
-                    transaction_reference=str(row[0]),
-                    amount=amount,
-                    merchant_name=str(row[3]),
-                    merchant_category=str(row[4]),
-                    payment_method=str(row[5]),
-                    device_type=str(row[6]),
-                    transaction_time=historical_time,
-                    location=str(row[8]),
-                    ip_address=str(row[9]),
-                    status=str(row[10]),
-                )
-            except (
-                TypeError,
-                ValueError,
-                IndexError,
-            ):
-                continue
-
-            transactions.append(transaction)
+            if transaction is not None:
+                transactions.append(transaction)
 
         return transactions

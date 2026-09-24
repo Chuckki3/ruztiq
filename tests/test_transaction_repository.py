@@ -1,23 +1,33 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.models.transaction import Transaction
-from src.repositories.transaction_repository import (
-    TransactionRepository,
-)
+from src.repositories.transaction_repository import TransactionRepository
 
 
 @pytest.fixture
-def repository():
+def dynamodb():
+    return MagicMock()
+
+
+@pytest.fixture
+def table():
+    return MagicMock()
+
+
+@pytest.fixture
+def repository(dynamodb, table):
     with patch(
-        "src.repositories.transaction_repository.boto3.client"
-    ) as mock_client:
+        "src.repositories.transaction_repository.boto3.resource",
+        return_value=dynamodb,
+    ):
+        dynamodb.Table.return_value = table
         repo = TransactionRepository()
-        repo.secrets_client = mock_client.return_value
-        return repo
+
+    return repo
 
 
 @pytest.fixture
@@ -44,87 +54,68 @@ def transaction():
     )
 
 
-@pytest.fixture
-def connection():
-    connection = MagicMock()
-    connection.cursor.return_value.__enter__.return_value = (
-        MagicMock()
-    )
-    return connection
+def test_repository_uses_dynamodb_table(repository, dynamodb, table):
+    dynamodb.Table.assert_called_once_with("Transactions")
+    assert repository.table is table
 
 
-def configure_credentials(repository):
-    repository.secrets_client.get_secret_value.return_value = {
-        "SecretString": (
-            '{"username":"test_user","password":"test_password"}'
-        )
-    }
+def test_repository_uses_configured_table_name():
+    dynamodb = MagicMock()
+    table = MagicMock()
+    dynamodb.Table.return_value = table
 
+    with patch(
+        "src.repositories.transaction_repository.boto3.resource",
+        return_value=dynamodb,
+    ):
+        with patch.dict(
+            "os.environ",
+            {
+                "AWS_REGION_NAME": "eu-west-1",
+                "TRANSACTIONS_TABLE": "CustomTransactions",
+            },
+            clear=False,
+        ):
+            repo = TransactionRepository()
 
-def get_cursor(connection):
-    return connection.cursor.return_value.__enter__.return_value
+    dynamodb.Table.assert_called_once_with("CustomTransactions")
+    assert repo.table is table
 
 
 def test_insert_transaction_persists_transaction(
     repository,
     transaction,
-    connection,
 ):
-    configure_credentials(repository)
-
-    with patch.object(
-        repository,
-        "_get_connection",
-        return_value=connection,
-    ):
-        result = repository.insert_transaction(transaction)
-
-    cursor = get_cursor(connection)
+    result = repository.insert_transaction(transaction)
 
     assert result == "txn-001"
 
-    cursor.execute.assert_called_once()
+    repository.table.put_item.assert_called_once()
 
-    query, params = cursor.execute.call_args.args
+    item = repository.table.put_item.call_args.kwargs["Item"]
 
-    assert "INSERT INTO transactions" in query
-    assert "transaction_reference" in query
-    assert "customer_id" in query
-    assert "transaction_time" in query
-
-    assert params == (
-        "txn-001",
-        1001,
-        Decimal("150.75"),
-        "Test Merchant",
-        "Retail",
-        "Card",
-        "Mobile",
-        datetime(
-            2026,
-            9,
-            14,
-            18,
-            30,
-            tzinfo=UTC,
-        ),
-        "Lagos",
-        "192.168.1.10",
-        "APPROVED",
+    assert item["customer_id"] == 1001
+    assert item["transaction_reference"] == "txn-001"
+    assert item["amount"] == Decimal("150.75")
+    assert item["merchant_name"] == "Test Merchant"
+    assert item["merchant_category"] == "Retail"
+    assert item["payment_method"] == "Card"
+    assert item["device_type"] == "Mobile"
+    assert item["transaction_time"] == (
+        "2026-09-14T18:30:00+00:00"
     )
-
-    connection.commit.assert_called_once()
-    connection.rollback.assert_not_called()
-    connection.close.assert_called_once()
+    assert item["location"] == "Lagos"
+    assert item["ip_address"] == "192.168.1.10"
+    assert item["status"] == "APPROVED"
+    assert item["transaction_key"] == (
+        "2026-09-14T18:30:00+00:00#txn-001"
+    )
 
 
 def test_insert_transaction_normalizes_naive_datetime(
     repository,
     transaction,
-    connection,
 ):
-    configure_credentials(repository)
-
     transaction.transaction_time = datetime(
         2026,
         9,
@@ -133,34 +124,23 @@ def test_insert_transaction_normalizes_naive_datetime(
         30,
     )
 
-    with patch.object(
-        repository,
-        "_get_connection",
-        return_value=connection,
-    ):
-        repository.insert_transaction(transaction)
+    repository.insert_transaction(transaction)
 
-    cursor = get_cursor(connection)
-    _, params = cursor.execute.call_args.args
+    item = repository.table.put_item.call_args.kwargs["Item"]
 
-    assert params[7] == datetime(
-        2026,
-        9,
-        14,
-        18,
-        30,
-        tzinfo=UTC,
+    assert item["transaction_time"] == (
+        "2026-09-14T18:30:00+00:00"
+    )
+    assert item["transaction_key"] == (
+        "2026-09-14T18:30:00+00:00#txn-001"
     )
 
 
 def test_insert_transaction_normalizes_non_utc_datetime(
     repository,
     transaction,
-    connection,
 ):
-    configure_credentials(repository)
-
-    from datetime import timezone, timedelta
+    from datetime import timezone
 
     transaction.transaction_time = datetime(
         2026,
@@ -171,131 +151,83 @@ def test_insert_transaction_normalizes_non_utc_datetime(
         tzinfo=timezone(timedelta(hours=1)),
     )
 
-    with patch.object(
-        repository,
-        "_get_connection",
-        return_value=connection,
-    ):
+    repository.insert_transaction(transaction)
+
+    item = repository.table.put_item.call_args.kwargs["Item"]
+
+    assert item["transaction_time"] == (
+        "2026-09-14T18:30:00+00:00"
+    )
+    assert item["transaction_key"] == (
+        "2026-09-14T18:30:00+00:00#txn-001"
+    )
+
+
+def test_insert_transaction_propagates_dynamodb_error(
+    repository,
+    transaction,
+):
+    repository.table.put_item.side_effect = RuntimeError(
+        "DynamoDB insert failed"
+    )
+
+    with pytest.raises(RuntimeError, match="DynamoDB insert failed"):
         repository.insert_transaction(transaction)
-
-    cursor = get_cursor(connection)
-    _, params = cursor.execute.call_args.args
-
-    assert params[7] == datetime(
-        2026,
-        9,
-        14,
-        18,
-        30,
-        tzinfo=UTC,
-    )
-
-
-def test_insert_transaction_rolls_back_on_error(
-    repository,
-    transaction,
-    connection,
-):
-    configure_credentials(repository)
-
-    cursor = get_cursor(connection)
-    cursor.execute.side_effect = RuntimeError(
-        "database insert failed"
-    )
-
-    with patch.object(
-        repository,
-        "_get_connection",
-        return_value=connection,
-    ):
-        with pytest.raises(
-            RuntimeError,
-            match="database insert failed",
-        ):
-            repository.insert_transaction(transaction)
-
-    connection.rollback.assert_called_once()
-    connection.commit.assert_not_called()
-    connection.close.assert_called_once()
-
-
-def test_insert_transaction_closes_connection_on_error(
-    repository,
-    transaction,
-    connection,
-):
-    configure_credentials(repository)
-
-    cursor = get_cursor(connection)
-    cursor.execute.side_effect = ValueError(
-        "insert failure"
-    )
-
-    with patch.object(
-        repository,
-        "_get_connection",
-        return_value=connection,
-    ):
-        with pytest.raises(
-            ValueError,
-            match="insert failure",
-        ):
-            repository.insert_transaction(transaction)
-
-    connection.close.assert_called_once()
 
 
 def test_count_transactions_returns_count(
     repository,
-    connection,
 ):
-    configure_credentials(repository)
+    repository.table.scan.return_value = {
+        "Count": 17,
+    }
 
-    cursor = get_cursor(connection)
-    cursor.fetchone.return_value = (17,)
+    assert repository.count_transactions() == 17
 
-    with patch.object(
-        repository,
-        "_get_connection",
-        return_value=connection,
-    ):
-        result = repository.count_transactions()
-
-    assert result == 17
-
-    query = cursor.execute.call_args.args[0]
-
-    assert "SELECT COUNT(*)" in query
-    assert "FROM transactions" in query
-
-    connection.close.assert_called_once()
+    repository.table.scan.assert_called_once_with()
 
 
 def test_count_transactions_converts_count_to_integer(
     repository,
-    connection,
 ):
-    cursor = get_cursor(connection)
-    cursor.fetchone.return_value = ("42",)
+    repository.table.scan.return_value = {
+        "Count": "42",
+    }
 
-    with patch.object(
-        repository,
-        "_get_connection",
-        return_value=connection,
-    ):
-        result = repository.count_transactions()
+    assert repository.count_transactions() == 42
 
-    assert result == 42
-    assert isinstance(result, int)
+
+def test_count_transactions_consumes_all_scan_pages(
+    repository,
+):
+    repository.table.scan.side_effect = [
+        {
+            "Count": 10,
+            "LastEvaluatedKey": {
+                "customer_id": 1001,
+                "transaction_key": "key-001",
+            },
+        },
+        {
+            "Count": 7,
+        },
+    ]
+
+    assert repository.count_transactions() == 17
+
+    assert repository.table.scan.call_count == 2
+
+    second_call = repository.table.scan.call_args_list[1]
+
+    assert second_call.kwargs["ExclusiveStartKey"] == {
+        "customer_id": 1001,
+        "transaction_key": "key-001",
+    }
 
 
 def test_get_recent_transactions_queries_velocity_window(
     repository,
-    connection,
 ):
-    cursor = get_cursor(connection)
-    cursor.fetchall.return_value = []
-
     transaction_time = datetime(
         2026,
         9,
@@ -305,58 +237,41 @@ def test_get_recent_transactions_queries_velocity_window(
         tzinfo=UTC,
     )
 
-    with patch.object(
-        repository,
-        "_get_connection",
-        return_value=connection,
-    ):
-        result = repository.get_recent_transactions(
-            customer_id=1001,
-            transaction_time=transaction_time,
-            window_minutes=5,
-        )
+    repository.table.query.return_value = {
+        "Items": [],
+    }
+
+    result = repository.get_recent_transactions(
+        customer_id=1001,
+        transaction_time=transaction_time,
+        window_minutes=5,
+    )
 
     assert result == []
 
-    query, params = cursor.execute.call_args.args
+    repository.table.query.assert_called_once()
 
-    assert "FROM transactions" in query
-    assert "WHERE customer_id = %s" in query
-    assert (
-        "transaction_time BETWEEN %s AND %s"
-        in query
-    )
-    assert "ORDER BY transaction_time" in query
+    kwargs = repository.table.query.call_args.kwargs
 
-    assert params == (
-        1001,
-        datetime(
-            2026,
-            9,
-            14,
-            18,
-            25,
-            tzinfo=UTC,
+    assert kwargs["ExpressionAttributeValues"] == {
+        ":customer_id": 1001,
+        ":start_key": (
+            "2026-09-14T18:25:00+00:00#"
         ),
-        datetime(
-            2026,
-            9,
-            14,
-            18,
-            30,
-            tzinfo=UTC,
+        ":end_key": (
+            "2026-09-14T18:30:00+00:00#\uffff"
         ),
-    )
+    }
 
-    connection.close.assert_called_once()
+    assert kwargs["ScanIndexForward"] is True
 
 
 def test_get_recent_transactions_normalizes_naive_query_time(
     repository,
-    connection,
 ):
-    cursor = get_cursor(connection)
-    cursor.fetchall.return_value = []
+    repository.table.query.return_value = {
+        "Items": [],
+    }
 
     naive_time = datetime(
         2026,
@@ -366,68 +281,51 @@ def test_get_recent_transactions_normalizes_naive_query_time(
         30,
     )
 
-    with patch.object(
-        repository,
-        "_get_connection",
-        return_value=connection,
-    ):
-        repository.get_recent_transactions(
-            customer_id=1001,
-            transaction_time=naive_time,
-            window_minutes=5,
-        )
-
-    _, params = cursor.execute.call_args.args
-
-    assert params[1] == datetime(
-        2026,
-        9,
-        14,
-        18,
-        25,
-        tzinfo=UTC,
+    repository.get_recent_transactions(
+        customer_id=1001,
+        transaction_time=naive_time,
+        window_minutes=5,
     )
 
-    assert params[2] == datetime(
-        2026,
-        9,
-        14,
-        18,
-        30,
-        tzinfo=UTC,
-    )
+    kwargs = repository.table.query.call_args.kwargs
+
+    assert kwargs["ExpressionAttributeValues"] == {
+        ":customer_id": 1001,
+        ":start_key": (
+            "2026-09-14T18:25:00+00:00#"
+        ),
+        ":end_key": (
+            "2026-09-14T18:30:00+00:00#\uffff"
+        ),
+    }
 
 
 def test_get_recent_transactions_reconstructs_transactions(
     repository,
-    connection,
 ):
-    cursor = get_cursor(connection)
-
-    historical_time = datetime(
-        2026,
-        9,
-        14,
-        18,
-        28,
-        tzinfo=UTC,
-    )
-
-    cursor.fetchall.return_value = [
-        (
-            "txn-history-001",
-            1001,
-            Decimal("275.50"),
-            "Supermarket",
-            "Groceries",
-            "Card",
-            "Mobile",
-            historical_time,
-            "Lagos",
-            "10.0.0.1",
-            "APPROVED",
-        )
-    ]
+    repository.table.query.return_value = {
+        "Items": [
+            {
+                "customer_id": 1001,
+                "transaction_key": (
+                    "2026-09-14T18:28:00+00:00#"
+                    "txn-history-001"
+                ),
+                "transaction_reference": "txn-history-001",
+                "amount": Decimal("275.50"),
+                "merchant_name": "Supermarket",
+                "merchant_category": "Groceries",
+                "payment_method": "Card",
+                "device_type": "Mobile",
+                "transaction_time": (
+                    "2026-09-14T18:28:00+00:00"
+                ),
+                "location": "Lagos",
+                "ip_address": "10.0.0.1",
+                "status": "APPROVED",
+            }
+        ]
+    }
 
     query_time = datetime(
         2026,
@@ -438,147 +336,111 @@ def test_get_recent_transactions_reconstructs_transactions(
         tzinfo=UTC,
     )
 
-    with patch.object(
-        repository,
-        "_get_connection",
-        return_value=connection,
-    ):
-        result = repository.get_recent_transactions(
-            customer_id=1001,
-            transaction_time=query_time,
-            window_minutes=5,
-        )
+    result = repository.get_recent_transactions(
+        customer_id=1001,
+        transaction_time=query_time,
+        window_minutes=5,
+    )
 
     assert len(result) == 1
 
-    result_transaction = result[0]
+    historical = result[0]
 
-    assert isinstance(
-        result_transaction,
-        Transaction,
+    assert isinstance(historical, Transaction)
+    assert historical.customer_id == 1001
+    assert historical.transaction_reference == (
+        "txn-history-001"
     )
-    assert (
-        result_transaction.transaction_reference
-        == "txn-history-001"
+    assert historical.amount == 275.50
+    assert historical.merchant_name == "Supermarket"
+    assert historical.merchant_category == "Groceries"
+    assert historical.payment_method == "Card"
+    assert historical.device_type == "Mobile"
+    assert historical.transaction_time == datetime(
+        2026,
+        9,
+        14,
+        18,
+        28,
+        tzinfo=UTC,
     )
-    assert result_transaction.customer_id == 1001
-    assert result_transaction.amount == 275.50
-    assert (
-        result_transaction.merchant_name
-        == "Supermarket"
-    )
-    assert (
-        result_transaction.merchant_category
-        == "Groceries"
-    )
-    assert (
-        result_transaction.payment_method
-        == "Card"
-    )
-    assert (
-        result_transaction.device_type
-        == "Mobile"
-    )
-    assert (
-        result_transaction.transaction_time
-        == historical_time
-    )
-    assert result_transaction.location == "Lagos"
-    assert result_transaction.ip_address == "10.0.0.1"
-    assert result_transaction.status == "APPROVED"
+    assert historical.location == "Lagos"
+    assert historical.ip_address == "10.0.0.1"
+    assert historical.status == "APPROVED"
 
 
 def test_get_recent_transactions_skips_missing_timestamp(
     repository,
-    connection,
 ):
-    cursor = get_cursor(connection)
+    repository.table.query.return_value = {
+        "Items": [
+            {
+                "customer_id": 1001,
+                "transaction_reference": "txn-invalid",
+                "amount": Decimal("100.00"),
+                "merchant_name": "Merchant",
+                "merchant_category": "Retail",
+                "payment_method": "Card",
+                "device_type": "Mobile",
+                "transaction_time": None,
+                "location": "Lagos",
+                "ip_address": "10.0.0.1",
+                "status": "APPROVED",
+            }
+        ]
+    }
 
-    cursor.fetchall.return_value = [
-        (
-            "txn-invalid",
-            1001,
-            Decimal("100.00"),
-            "Merchant",
-            "Retail",
-            "Card",
-            "Mobile",
-            None,
-            "Lagos",
-            "10.0.0.1",
-            "APPROVED",
-        )
-    ]
-
-    with patch.object(
-        repository,
-        "_get_connection",
-        return_value=connection,
-    ):
-        result = repository.get_recent_transactions(
-            customer_id=1001,
-            transaction_time=datetime(
-                2026,
-                9,
-                14,
-                18,
-                30,
-                tzinfo=UTC,
-            ),
-            window_minutes=5,
-        )
+    result = repository.get_recent_transactions(
+        customer_id=1001,
+        transaction_time=datetime(
+            2026,
+            9,
+            14,
+            18,
+            30,
+            tzinfo=UTC,
+        ),
+    )
 
     assert result == []
 
 
 def test_get_recent_transactions_normalizes_naive_historical_time(
     repository,
-    connection,
 ):
-    cursor = get_cursor(connection)
+    repository.table.query.return_value = {
+        "Items": [
+            {
+                "customer_id": 1001,
+                "transaction_reference": "txn-naive",
+                "amount": Decimal("100.00"),
+                "merchant_name": "Merchant",
+                "merchant_category": "Retail",
+                "payment_method": "Card",
+                "device_type": "Mobile",
+                "transaction_time": (
+                    "2026-09-14T18:28:00"
+                ),
+                "location": "Lagos",
+                "ip_address": "10.0.0.1",
+                "status": "APPROVED",
+            }
+        ]
+    }
 
-    cursor.fetchall.return_value = [
-        (
-            "txn-naive",
-            1001,
-            Decimal("100.00"),
-            "Merchant",
-            "Retail",
-            "Card",
-            "Mobile",
-            datetime(
-                2026,
-                9,
-                14,
-                18,
-                28,
-            ),
-            "Lagos",
-            "10.0.0.1",
-            "APPROVED",
-        )
-    ]
-
-    with patch.object(
-        repository,
-        "_get_connection",
-        return_value=connection,
-    ):
-        result = repository.get_recent_transactions(
-            customer_id=1001,
-            transaction_time=datetime(
-                2026,
-                9,
-                14,
-                18,
-                30,
-                tzinfo=UTC,
-            ),
-            window_minutes=5,
-        )
+    result = repository.get_recent_transactions(
+        customer_id=1001,
+        transaction_time=datetime(
+            2026,
+            9,
+            14,
+            18,
+            30,
+            tzinfo=UTC,
+        ),
+    )
 
     assert len(result) == 1
-
     assert result[0].transaction_time == datetime(
         2026,
         9,
@@ -589,41 +451,56 @@ def test_get_recent_transactions_normalizes_naive_historical_time(
     )
 
 
-def test_get_recent_transactions_skips_malformed_row(
+def test_get_recent_transactions_skips_malformed_item(
     repository,
-    connection,
 ):
-    cursor = get_cursor(connection)
+    repository.table.query.return_value = {
+        "Items": [
+            {
+                "customer_id": "not-an-integer",
+                "transaction_reference": "txn-malformed",
+                "amount": Decimal("100.00"),
+                "merchant_name": "Merchant",
+                "merchant_category": "Retail",
+                "payment_method": "Card",
+                "device_type": "Mobile",
+                "transaction_time": (
+                    "2026-09-14T18:28:00+00:00"
+                ),
+                "location": "Lagos",
+                "ip_address": "10.0.0.1",
+                "status": "APPROVED",
+            }
+        ]
+    }
 
-    cursor.fetchall.return_value = [
-        (
-            "txn-malformed",
-            "not-an-integer",
-            Decimal("100.00"),
-            "Merchant",
-            "Retail",
-            "Card",
-            "Mobile",
-            datetime(
-                2026,
-                9,
-                14,
-                18,
-                28,
-                tzinfo=UTC,
-            ),
-            "Lagos",
-            "10.0.0.1",
-            "APPROVED",
-        )
-    ]
+    result = repository.get_recent_transactions(
+        customer_id=1001,
+        transaction_time=datetime(
+            2026,
+            9,
+            14,
+            18,
+            30,
+            tzinfo=UTC,
+        ),
+    )
 
-    with patch.object(
-        repository,
-        "_get_connection",
-        return_value=connection,
+    assert result == []
+
+
+def test_get_recent_transactions_propagates_query_error(
+    repository,
+):
+    repository.table.query.side_effect = RuntimeError(
+        "DynamoDB query failed"
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="DynamoDB query failed",
     ):
-        result = repository.get_recent_transactions(
+        repository.get_recent_transactions(
             customer_id=1001,
             transaction_time=datetime(
                 2026,
@@ -633,115 +510,70 @@ def test_get_recent_transactions_skips_malformed_row(
                 30,
                 tzinfo=UTC,
             ),
-            window_minutes=5,
         )
-
-    assert result == []
-
-
-def test_get_recent_transactions_propagates_query_error(
-    repository,
-    connection,
-):
-    cursor = get_cursor(connection)
-    cursor.execute.side_effect = RuntimeError(
-        "database query failed"
-    )
-
-    with patch.object(
-        repository,
-        "_get_connection",
-        return_value=connection,
-    ):
-        with pytest.raises(
-            RuntimeError,
-            match="database query failed",
-        ):
-            repository.get_recent_transactions(
-                customer_id=1001,
-                transaction_time=datetime(
-                    2026,
-                    9,
-                    14,
-                    18,
-                    30,
-                    tzinfo=UTC,
-                ),
-                window_minutes=5,
-            )
-
-    connection.close.assert_called_once()
 
 
 def test_get_random_customer_id_returns_customer_id(
     repository,
-    connection,
 ):
-    cursor = get_cursor(connection)
-    cursor.fetchone.return_value = (1001,)
+    repository.table.scan.return_value = {
+        "Items": [
+            {"customer_id": 1001},
+            {"customer_id": 1002},
+        ]
+    }
 
-    with patch.object(
-        repository,
-        "_get_connection",
-        return_value=connection,
+    with patch(
+        "src.repositories.transaction_repository.random.choice",
+        return_value=1001,
     ):
         result = repository.get_random_customer_id()
 
     assert result == 1001
 
-    query = cursor.execute.call_args.args[0]
+    kwargs = repository.table.scan.call_args.kwargs
 
-    assert "SELECT customer_id" in query
-    assert "FROM transactions" in query
-    assert "ORDER BY RANDOM()" in query
-    assert "LIMIT 1" in query
-
-    connection.close.assert_called_once()
+    assert kwargs["ProjectionExpression"] == "customer_id"
 
 
 def test_get_random_customer_id_falls_back_when_empty(
     repository,
-    connection,
 ):
-    cursor = get_cursor(connection)
-    cursor.fetchone.return_value = None
+    repository.table.scan.return_value = {
+        "Items": [],
+    }
 
-    with patch.object(
-        repository,
-        "_get_connection",
-        return_value=connection,
+    assert repository.get_random_customer_id() == 1
+
+
+def test_get_random_customer_id_consumes_all_scan_pages(
+    repository,
+):
+    repository.table.scan.side_effect = [
+        {
+            "Items": [{"customer_id": 1001}],
+            "LastEvaluatedKey": {
+                "customer_id": 1001,
+                "transaction_key": "key-001",
+            },
+        },
+        {
+            "Items": [{"customer_id": 1002}],
+        },
+    ]
+
+    with patch(
+        "src.repositories.transaction_repository.random.choice",
+        return_value=1002,
     ):
         result = repository.get_random_customer_id()
 
-    assert result == 1
-    connection.close.assert_called_once()
+    assert result == 1002
+    assert repository.table.scan.call_count == 2
 
+    second_call = repository.table.scan.call_args_list[1]
 
-def test_get_connection_loads_credentials_from_secrets_manager(
-    repository,
-):
-    repository.secrets_client.get_secret_value.return_value = {
-        "SecretString": (
-            '{"username":"db_user","password":"db_password"}'
-        )
+    assert second_call.kwargs["ExclusiveStartKey"] == {
+        "customer_id": 1001,
+        "transaction_key": "key-001",
     }
-
-    with patch(
-        "src.repositories.transaction_repository.psycopg2.connect"
-    ) as mock_connect:
-        result = repository._get_connection()
-
-    repository.secrets_client.get_secret_value.assert_called_once_with(
-        SecretId=repository.secret_name
-    )
-
-    mock_connect.assert_called_once_with(
-        host=repository.db_host,
-        port=repository.db_port,
-        dbname=repository.db_name,
-        user="db_user",
-        password="db_password",
-        connect_timeout=10,
-    )
-
-    assert result == mock_connect.return_value

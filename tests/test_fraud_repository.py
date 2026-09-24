@@ -1,7 +1,9 @@
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from decimal import Decimal
+from unittest.mock import MagicMock
 
 import pytest
+from botocore.exceptions import ClientError
 
 from src.models.fraud_result import FraudResult
 from src.repositories.fraud_repository import FraudRepository
@@ -38,69 +40,178 @@ def make_decision():
 
 
 def make_repository():
-    repository = FraudRepository()
-    repository._get_database_credentials = MagicMock(
-        return_value=("test-user", "test-password")
+    repository = FraudRepository.__new__(
+        FraudRepository
     )
+
+    repository.region_name = "eu-west-1"
+    repository.table_name = "FraudResults"
+    repository.dynamodb = MagicMock()
+    repository.table = MagicMock()
+
     return repository
 
 
-def make_connection():
-    connection = MagicMock()
-    cursor = connection.cursor.return_value
-    return connection, cursor
+def conditional_failure():
+    return ClientError(
+        {
+            "Error": {
+                "Code": (
+                    "ConditionalCheckFailedException"
+                ),
+                "Message": "The conditional request failed",
+            }
+        },
+        "PutItem",
+    )
 
 
-@patch(
-    "src.repositories.fraud_repository.boto3.client"
-)
-def test_repository_initializes_secrets_client(
-    mock_boto_client,
+def unexpected_dynamodb_error():
+    return ClientError(
+        {
+            "Error": {
+                "Code": "ProvisionedThroughputExceededException",
+                "Message": "Capacity exceeded",
+            }
+        },
+        "PutItem",
+    )
+
+
+def test_repository_initializes_default_configuration(
+    monkeypatch,
 ):
+    monkeypatch.delenv(
+        "AWS_REGION_NAME",
+        raising=False,
+    )
+    monkeypatch.delenv(
+        "FRAUD_RESULTS_TABLE",
+        raising=False,
+    )
+
     repository = FraudRepository()
 
-    mock_boto_client.assert_called_once_with(
-        "secretsmanager"
-    )
-    assert repository.db_secret_name == (
-        "sentineliq/rds/postgres"
-    )
-    assert repository.db_port == 5432
+    assert repository.region_name == "eu-west-1"
+    assert repository.table_name == "FraudResults"
+    assert repository.table is not None
 
 
-@patch(
-    "src.repositories.fraud_repository.psycopg2.connect"
-)
-def test_get_result_returns_none_when_result_does_not_exist(
-    mock_connect,
+def test_repository_uses_custom_environment_configuration(
+    monkeypatch,
 ):
-    connection, cursor = make_connection()
-    cursor.fetchone.return_value = None
-    mock_connect.return_value = connection
-
-    repository = make_repository()
-
-    result = repository.get_result("TX-MISSING")
-
-    assert result is None
-
-    cursor.execute.assert_called_once()
-    assert cursor.execute.call_args.args[1] == (
-        "TX-MISSING",
+    monkeypatch.setenv(
+        "AWS_REGION_NAME",
+        "us-east-1",
     )
-    cursor.close.assert_called_once()
-    connection.close.assert_called_once()
+    monkeypatch.setenv(
+        "FRAUD_RESULTS_TABLE",
+        "CustomFraudResults",
+    )
+
+    repository = FraudRepository()
+
+    assert repository.region_name == "us-east-1"
+    assert repository.table_name == (
+        "CustomFraudResults"
+    )
 
 
-@patch(
-    "src.repositories.fraud_repository.psycopg2.connect"
-)
-def test_get_result_reconstructs_fraud_result_and_decision(
-    mock_connect,
-):
-    connection, cursor = make_connection()
+def test_result_item_serializes_domain_model():
+    result = make_fraud_result()
 
-    evaluated_at = datetime(
+    item = FraudRepository._result_item(
+        result
+    )
+
+    assert item == {
+        "transaction_reference": (
+            "TX-REPO-001"
+        ),
+        "risk_score": 82,
+        "risk_level": "HIGH",
+        "is_fraud": True,
+        "reasons": "New device detected",
+        "evaluated_at": (
+            "2026-08-27T12:00:00+00:00"
+        ),
+    }
+
+
+def test_result_item_normalizes_naive_datetime():
+    result = make_fraud_result()
+    result.evaluated_at = datetime(
+        2026,
+        8,
+        27,
+        12,
+        0,
+        0,
+    )
+
+    item = FraudRepository._result_item(
+        result
+    )
+
+    assert item["evaluated_at"] == (
+        "2026-08-27T12:00:00+00:00"
+    )
+
+
+def test_result_with_decision_item_serializes_complete_snapshot():
+    item = FraudRepository._result_with_decision_item(
+        make_fraud_result(),
+        make_decision(),
+    )
+
+    assert item == {
+        "transaction_reference": (
+            "TX-REPO-001"
+        ),
+        "risk_score": 82,
+        "risk_level": "HIGH",
+        "is_fraud": True,
+        "reasons": "New device detected",
+        "evaluated_at": (
+            "2026-08-27T12:00:00+00:00"
+        ),
+        "decision": "DECLINE",
+        "decision_reason": "High fraud risk",
+        "decision_risk_score": 82,
+        "decision_risk_level": "HIGH",
+        "decision_is_fraud": True,
+        "velocity_violation": False,
+    }
+
+
+def test_item_to_fraud_result_reconstructs_model():
+    item = {
+        "transaction_reference": (
+            "TX-REPO-001"
+        ),
+        "risk_score": Decimal("82"),
+        "risk_level": "HIGH",
+        "is_fraud": True,
+        "reasons": "New device detected",
+        "evaluated_at": (
+            "2026-08-27T12:00:00+00:00"
+        ),
+    }
+
+    result = FraudRepository._item_to_fraud_result(
+        item
+    )
+
+    assert result.transaction_reference == (
+        "TX-REPO-001"
+    )
+    assert result.risk_score == 82
+    assert result.risk_level == "HIGH"
+    assert result.is_fraud is True
+    assert result.reasons == (
+        "New device detected"
+    )
+    assert result.evaluated_at == datetime(
         2026,
         8,
         27,
@@ -110,26 +221,79 @@ def test_get_result_reconstructs_fraud_result_and_decision(
         tzinfo=UTC,
     )
 
-    cursor.fetchone.return_value = (
-        "TX-REPO-001",
-        82,
-        "HIGH",
-        True,
-        "New device detected",
-        evaluated_at,
-        "DECLINE",
-        "High fraud risk",
-        82,
-        "HIGH",
-        True,
-        False,
+
+def test_item_to_fraud_result_normalizes_naive_datetime():
+    item = {
+        "transaction_reference": "TX-NAIVE",
+        "risk_score": Decimal("10"),
+        "risk_level": "LOW",
+        "is_fraud": False,
+        "reasons": "Normal",
+        "evaluated_at": (
+            "2026-08-27T12:00:00"
+        ),
+    }
+
+    result = FraudRepository._item_to_fraud_result(
+        item
     )
 
-    mock_connect.return_value = connection
+    assert result.evaluated_at == datetime(
+        2026,
+        8,
+        27,
+        12,
+        0,
+        0,
+        tzinfo=UTC,
+    )
 
+
+def test_get_result_returns_none_when_missing():
     repository = make_repository()
 
-    result = repository.get_result("TX-REPO-001")
+    repository.table.get_item.return_value = {}
+
+    result = repository.get_result(
+        "TX-MISSING"
+    )
+
+    assert result is None
+
+    repository.table.get_item.assert_called_once_with(
+        Key={
+            "transaction_reference": "TX-MISSING"
+        }
+    )
+
+
+def test_get_result_reconstructs_result_and_decision():
+    repository = make_repository()
+
+    repository.table.get_item.return_value = {
+        "Item": {
+            "transaction_reference": (
+                "TX-REPO-001"
+            ),
+            "risk_score": Decimal("82"),
+            "risk_level": "HIGH",
+            "is_fraud": True,
+            "reasons": "New device detected",
+            "evaluated_at": (
+                "2026-08-27T12:00:00+00:00"
+            ),
+            "decision": "DECLINE",
+            "decision_reason": "High fraud risk",
+            "decision_risk_score": Decimal("82"),
+            "decision_risk_level": "HIGH",
+            "decision_is_fraud": True,
+            "velocity_violation": False,
+        }
+    }
+
+    result = repository.get_result(
+        "TX-REPO-001"
+    )
 
     assert result is not None
 
@@ -144,7 +308,15 @@ def test_get_result_reconstructs_fraud_result_and_decision(
     assert fraud_result.reasons == (
         "New device detected"
     )
-    assert fraud_result.evaluated_at == evaluated_at
+    assert fraud_result.evaluated_at == datetime(
+        2026,
+        8,
+        27,
+        12,
+        0,
+        0,
+        tzinfo=UTC,
+    )
 
     assert result["decision"] == {
         "decision": "DECLINE",
@@ -155,55 +327,42 @@ def test_get_result_reconstructs_fraud_result_and_decision(
         "velocity_violation": False,
     }
 
-    cursor.close.assert_called_once()
-    connection.close.assert_called_once()
 
-
-@patch(
-    "src.repositories.fraud_repository.psycopg2.connect"
-)
-def test_get_result_supports_legacy_fraud_result(
-    mock_connect,
-):
-    connection, cursor = make_connection()
-
-    evaluated_at = datetime(
-        2026,
-        8,
-        27,
-        12,
-        0,
-        0,
-        tzinfo=UTC,
-    )
-
-    cursor.fetchone.return_value = (
-        "TX-LEGACY-001",
-        82,
-        "HIGH",
-        True,
-        "Suspicious activity",
-        evaluated_at,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-
-    mock_connect.return_value = connection
-
+def test_get_result_supports_legacy_fraud_result():
     repository = make_repository()
 
-    result = repository.get_result("TX-LEGACY-001")
+    repository.table.get_item.return_value = {
+        "Item": {
+            "transaction_reference": (
+                "TX-LEGACY-001"
+            ),
+            "risk_score": Decimal("82"),
+            "risk_level": "HIGH",
+            "is_fraud": True,
+            "reasons": "Suspicious activity",
+            "evaluated_at": (
+                "2026-08-27T12:00:00+00:00"
+            ),
+        }
+    }
+
+    result = repository.get_result(
+        "TX-LEGACY-001"
+    )
 
     assert result is not None
     assert result["fraud_result"].risk_score == 82
-    assert result["decision"]["decision"] == "DECLINE"
+    assert result["decision"]["decision"] == (
+        "DECLINE"
+    )
     assert result["decision"]["decision_reason"] == (
         "Existing fraud result"
     )
+    assert result["decision"]["risk_score"] == 82
+    assert result["decision"]["risk_level"] == (
+        "HIGH"
+    )
+    assert result["decision"]["is_fraud"] is True
     assert result["decision"]["velocity_violation"] is False
 
 
@@ -238,77 +397,43 @@ def test_legacy_decision_mapping(
     )
 
 
-@patch(
-    "src.repositories.fraud_repository.psycopg2.connect"
-)
-def test_insert_result_persists_fraud_result(
-    mock_connect,
-):
-    connection, cursor = make_connection()
-    mock_connect.return_value = connection
-
+def test_insert_result_writes_dynamodb_item():
     repository = make_repository()
+
     result = make_fraud_result()
 
     repository.insert_result(result)
 
-    assert cursor.execute.call_count == 1
-
-    query, params = cursor.execute.call_args.args
-
-    assert "INSERT INTO fraud_results" in query
-    assert "transaction_reference" in query
-    assert "risk_score" in query
-    assert "evaluated_at" in query
-
-    assert params == (
-        "TX-REPO-001",
-        82,
-        "HIGH",
-        True,
-        "New device detected",
-        result.evaluated_at,
+    repository.table.put_item.assert_called_once_with(
+        Item={
+            "transaction_reference": (
+                "TX-REPO-001"
+            ),
+            "risk_score": 82,
+            "risk_level": "HIGH",
+            "is_fraud": True,
+            "reasons": "New device detected",
+            "evaluated_at": (
+                "2026-08-27T12:00:00+00:00"
+            ),
+        }
     )
 
-    connection.commit.assert_called_once()
-    connection.close.assert_called_once()
 
-
-@patch(
-    "src.repositories.fraud_repository.psycopg2.connect"
-)
-def test_insert_result_rolls_back_on_error(
-    mock_connect,
-):
-    connection, cursor = make_connection()
-    cursor.execute.side_effect = RuntimeError(
-        "database error"
-    )
-    mock_connect.return_value = connection
-
+def test_insert_result_propagates_dynamodb_error():
     repository = make_repository()
+
+    repository.table.put_item.side_effect = (
+        RuntimeError("DynamoDB unavailable")
+    )
 
     with pytest.raises(RuntimeError):
         repository.insert_result(
             make_fraud_result()
         )
 
-    connection.rollback.assert_called_once()
-    connection.close.assert_called_once()
 
-
-@patch(
-    "src.repositories.fraud_repository.psycopg2.connect"
-)
-def test_insert_result_if_absent_stores_decision_snapshot(
-    mock_connect,
-):
-    connection, cursor = make_connection()
-    cursor.fetchone.return_value = (
-        "TX-REPO-001",
-    )
-    mock_connect.return_value = connection
-
+def test_insert_result_if_absent_writes_conditionally():
     repository = make_repository()
 
     stored = repository.insert_result_if_absent(
@@ -318,42 +443,38 @@ def test_insert_result_if_absent_stores_decision_snapshot(
 
     assert stored is True
 
-    query, params = cursor.execute.call_args.args
-
-    assert "ON CONFLICT" in query
-    assert "DO NOTHING" in query
-    assert "RETURNING transaction_reference" in query
-
-    assert params == (
-        "TX-REPO-001",
-        82,
-        "HIGH",
-        True,
-        "New device detected",
-        make_fraud_result().evaluated_at,
-        "DECLINE",
-        "High fraud risk",
-        82,
-        "HIGH",
-        True,
-        False,
+    repository.table.put_item.assert_called_once_with(
+        Item={
+            "transaction_reference": (
+                "TX-REPO-001"
+            ),
+            "risk_score": 82,
+            "risk_level": "HIGH",
+            "is_fraud": True,
+            "reasons": "New device detected",
+            "evaluated_at": (
+                "2026-08-27T12:00:00+00:00"
+            ),
+            "decision": "DECLINE",
+            "decision_reason": "High fraud risk",
+            "decision_risk_score": 82,
+            "decision_risk_level": "HIGH",
+            "decision_is_fraud": True,
+            "velocity_violation": False,
+        },
+        ConditionExpression=(
+            "attribute_not_exists("
+            "transaction_reference)"
+        ),
     )
 
-    connection.commit.assert_called_once()
-    connection.close.assert_called_once()
 
-
-@patch(
-    "src.repositories.fraud_repository.psycopg2.connect"
-)
-def test_insert_result_if_absent_returns_false_for_duplicate(
-    mock_connect,
-):
-    connection, cursor = make_connection()
-    cursor.fetchone.return_value = None
-    mock_connect.return_value = connection
-
+def test_insert_result_if_absent_returns_false_for_duplicate():
     repository = make_repository()
+
+    repository.table.put_item.side_effect = (
+        conditional_failure()
+    )
 
     stored = repository.insert_result_if_absent(
         make_fraud_result(),
@@ -361,23 +482,30 @@ def test_insert_result_if_absent_returns_false_for_duplicate(
     )
 
     assert stored is False
-    connection.commit.assert_called_once()
-    connection.close.assert_called_once()
+
+    repository.table.put_item.assert_called_once()
 
 
-@patch(
-    "src.repositories.fraud_repository.psycopg2.connect"
-)
-def test_insert_result_if_absent_rolls_back_on_error(
-    mock_connect,
-):
-    connection, cursor = make_connection()
-    cursor.execute.side_effect = RuntimeError(
-        "database unavailable"
-    )
-    mock_connect.return_value = connection
-
+def test_insert_result_if_absent_reraises_unexpected_client_error():
     repository = make_repository()
+
+    repository.table.put_item.side_effect = (
+        unexpected_dynamodb_error()
+    )
+
+    with pytest.raises(ClientError):
+        repository.insert_result_if_absent(
+            make_fraud_result(),
+            make_decision(),
+        )
+
+
+def test_insert_result_if_absent_propagates_unexpected_error():
+    repository = make_repository()
+
+    repository.table.put_item.side_effect = (
+        RuntimeError("DynamoDB unavailable")
+    )
 
     with pytest.raises(RuntimeError):
         repository.insert_result_if_absent(
@@ -385,71 +513,53 @@ def test_insert_result_if_absent_rolls_back_on_error(
             make_decision(),
         )
 
-    connection.rollback.assert_called_once()
-    connection.close.assert_called_once()
 
-
-@patch(
-    "src.repositories.fraud_repository.psycopg2.connect"
-)
-def test_count_results_returns_postgresql_count(
-    mock_connect,
-):
-    connection, cursor = make_connection()
-    cursor.fetchone.return_value = (13,)
-    mock_connect.return_value = connection
-
+def test_count_results_returns_single_page_count():
     repository = make_repository()
+
+    repository.table.scan.return_value = {
+        "Count": 13
+    }
 
     assert repository.count_results() == 13
 
-    query = cursor.execute.call_args.args[0]
-
-    assert "SELECT COUNT(*)" in query
-    assert "FROM fraud_results" in query
-
-    cursor.close.assert_called_once()
-    connection.close.assert_called_once()
+    repository.table.scan.assert_called_once_with()
 
 
-@patch(
-    "src.repositories.fraud_repository.psycopg2.connect"
-)
-def test_database_connection_uses_secret_credentials(
-    mock_connect,
-):
-    connection, cursor = make_connection()
-    cursor.fetchone.return_value = None
-    mock_connect.return_value = connection
-
+def test_count_results_paginates_all_pages():
     repository = make_repository()
 
-    repository.get_result("TX-CONNECTION")
+    repository.table.scan.side_effect = [
+        {
+            "Count": 10,
+            "LastEvaluatedKey": {
+                "transaction_reference": "TX-010"
+            },
+        },
+        {
+            "Count": 3
+        },
+    ]
 
-    mock_connect.assert_called_once_with(
-        host=repository.db_host,
-        port=repository.db_port,
-        dbname=repository.db_name,
-        user="test-user",
-        password="test-password",
-        connect_timeout=10,
+    assert repository.count_results() == 13
+
+    assert repository.table.scan.call_count == 2
+
+    repository.table.scan.assert_any_call()
+
+    repository.table.scan.assert_any_call(
+        ExclusiveStartKey={
+            "transaction_reference": "TX-010"
+        }
     )
 
-    cursor.close.assert_called_once()
-    connection.close.assert_called_once()
 
-
-@patch(
-    "src.repositories.fraud_repository.psycopg2.connect"
-)
-def test_get_result_rolls_up_connection_failure(
-    mock_connect,
-):
-    mock_connect.side_effect = RuntimeError(
-        "connection failed"
-    )
-
+def test_get_result_propagates_dynamodb_error():
     repository = make_repository()
+
+    repository.table.get_item.side_effect = (
+        RuntimeError("DynamoDB unavailable")
+    )
 
     with pytest.raises(RuntimeError):
         repository.get_result("TX-ERROR")
