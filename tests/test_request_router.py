@@ -34,7 +34,7 @@ def test_valid_api_request(mock_metrics, mock_pipeline):
     mock_fraud_result.risk_score = 18.5
     mock_fraud_result.risk_level = "LOW"
     mock_fraud_result.is_fraud = False
-    mock_fraud_result.reasons = []
+    mock_fraud_result.reasons = "No suspicious activity"
 
     mock_pipeline_instance = mock_pipeline.return_value
 
@@ -66,7 +66,7 @@ def test_valid_api_request(mock_metrics, mock_pipeline):
     assert body["risk_score"] == 18.5
     assert body["risk_level"] == "LOW"
     assert body["is_fraud"] is False
-    assert body["reasons"] == []
+    assert body["reasons"] == "No suspicious activity"
     assert body["decision"] == "APPROVE"
     assert body["decision_reason"] == (
         "Transaction is below the configured "
@@ -220,3 +220,62 @@ def test_malformed_json_returns_400(mock_metrics):
 
     mock_metrics.validation_error.assert_called_once()
 
+
+
+@patch("src.services.request_router.PipelineService")
+@patch("src.services.request_router.MetricsService")
+def test_decline_api_request_returns_complete_response(
+    mock_metrics,
+    mock_pipeline,
+):
+    mock_fraud_result = MagicMock()
+
+    mock_fraud_result.transaction_reference = "API-DECLINE001"
+    mock_fraud_result.risk_score = 82
+    mock_fraud_result.risk_level = "HIGH"
+    mock_fraud_result.is_fraud = True
+    mock_fraud_result.reasons = (
+        "New device detected, High transaction velocity"
+    )
+
+    mock_pipeline_instance = mock_pipeline.return_value
+
+    mock_pipeline_instance.process_existing_transaction.return_value = {
+        "fraud_result": mock_fraud_result,
+        "decision": {
+            "decision": "DECLINE",
+            "decision_reason": (
+                "Risk score exceeds the automatic decline threshold."
+            ),
+            "velocity_violation": True,
+        },
+    }
+
+    router = RequestRouter()
+
+    payload = valid_payload()
+    payload["transaction_reference"] = "API-DECLINE001"
+
+    response = router.handle({"body": json.dumps(payload)})
+
+    assert response["statusCode"] == 200
+
+    body = json.loads(response["body"])
+
+    assert body == {
+        "transaction_reference": "API-DECLINE001",
+        "risk_score": 82,
+        "risk_level": "HIGH",
+        "is_fraud": True,
+        "reasons": (
+            "New device detected, High transaction velocity"
+        ),
+        "decision": "DECLINE",
+        "decision_reason": (
+            "Risk score exceeds the automatic decline threshold."
+        ),
+        "velocity_violation": True,
+    }
+
+    mock_metrics.api_request.assert_called_once()
+    mock_pipeline_instance.process_existing_transaction.assert_called_once()

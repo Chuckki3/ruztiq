@@ -28,11 +28,11 @@ These outputs are related but are not interchangeable.
 | Success response | `200 OK` |
 | Request validation failure | `400 Bad Request` |
 
-The deployed endpoint is exposed through the `ApiEndpoint` output in the AWS CloudFormation/SAM stack. Its general form is:
+The verified deployed endpoint is:
 
-`https://{api-id}.execute-api.{region}.amazonaws.com/Prod/score`
+https://5a6400nk92.execute-api.eu-west-1.amazonaws.com/Prod/score
 
-Replace the placeholders with the actual deployed values. Do not treat the template pattern as a live endpoint.
+Deployment environments can differ; verify the endpoint against the relevant stack output before using this URL for another environment.
 
 ## 3. Authentication
 
@@ -56,7 +56,7 @@ The secret's `SecretString` is expected to contain JSON with a non-empty string 
 
 **Deployment configuration note:** the authorizer code defaults to the secret name `sentineliq/api/auth`. The infrastructure template also sets `API_AUTH_SECRET_NAME` to that value and grants access to the secret identified by the `ApiAuthSecretArn` parameter. Ensure the name and ARN refer to the same secret in the target environment.
 
-The authorizer returns an IAM policy, not an application-level JSON error. The final HTTP status and response body for rejected requests are determined by API Gateway configuration. Do not assume a fixed error body for authorization failures.
+The authorizer returns an IAM policy, not an application-level JSON error. On the deployed endpoint, a request with the `Authorization` header omitted was verified to return HTTP `401` with `{"message":"Unauthorized"}`. This confirms the missing-header case only; do not assume that every invalid token, secret lookup failure, or authorizer error returns the same status and body.
 
 ## 4. Request body
 
@@ -136,20 +136,34 @@ A successful scoring request returns HTTP `200` with a JSON body containing thes
 | `decision_reason` | string | Explanation for the operational decision |
 | `velocity_violation` | boolean | Whether the configured transaction-velocity threshold was exceeded |
 
-Example response:
+Illustrative APPROVE response from a router test fixture:
 
     {
       "transaction_reference": "API-TEST123456",
-      "risk_score": 30,
-      "risk_level": "MEDIUM",
+      "risk_score": 18.5,
+      "risk_level": "LOW",
       "is_fraud": false,
-      "reasons": "Late Night Transaction, New Device",
+      "reasons": "No suspicious activity",
       "decision": "APPROVE",
       "decision_reason": "Transaction is below the configured review threshold.",
       "velocity_violation": false
     }
+This is a test-fixture example, not a prediction for the sample request. Actual scores and reasons depend on transaction attributes, profile, history, and scoring rules.
 
-This is an illustrative response showing the response structure, not a guaranteed score for the example request. Actual scores and reasons depend on the transaction time, profile, history, and scoring rules.
+### DECLINE response example
+
+The following is an illustrative router-test fixture, not a guaranteed live response for a particular transaction:
+
+    {
+      "transaction_reference": "API-DECLINE001",
+      "risk_score": 82,
+      "risk_level": "HIGH",
+      "is_fraud": true,
+      "reasons": "New device detected, High transaction velocity",
+      "decision": "DECLINE",
+      "decision_reason": "Risk score exceeds the automatic decline threshold.",
+      "velocity_violation": true
+    }
 
 ## 7. Risk scoring
 
@@ -255,7 +269,13 @@ The first encountered validation failure is returned; this is not a comprehensiv
 
 ### Authentication failure
 
-The Lambda authorizer returns a Deny policy for missing/malformed credentials, invalid tokens, or failure to retrieve a usable secret. API Gateway determines the HTTP response status and body. Depending on API Gateway's handling and configuration, clients may receive an authorization-related `401` or `403`.
+The deployed endpoint was tested with the `Authorization` header omitted and returned HTTP `401`:
+
+    {
+      "message": "Unauthorized"
+    }
+
+This is verified for a missing header only. The authorizer returns a Deny policy for rejected credentials, but the client-visible status and body for invalid tokens or authorizer/secret failures must be verified separately against the deployed API Gateway configuration.
 
 ### Unexpected processing failure
 

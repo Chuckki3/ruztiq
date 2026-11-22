@@ -1,23 +1,29 @@
 openapi: 3.0.3
+
 info:
   title: RuztIQ Fraud Detection API
   version: 1.0.0
   description: |
     Scores a transaction for potential fraud and returns a risk classification,
-    fraud flag, reasons, operational decision, and velocity-violation status.
+    fraud flag, scoring reasons, operational decision, and velocity-violation status.
 
-    The API contract reflects the current implementation. In particular,
-    status is required by request validation; currency, merchant_id, and
-    device_id are accepted but are not transferred to the internal transaction
-    model used by the pipeline. See documentation.md for implementation notes,
-    scoring rules, idempotency semantics, and known validation limitations.
+    This specification reflects the current implementation.
+
+    Important implementation details:
+    - status is required by request validation.
+    - currency, merchant_id, and device_id are accepted but are not transferred
+      to the internal Transaction model.
+    - transaction_time is converted to UTC and passed into the internal model.
+    - transaction_reference is used as the idempotency key.
+    - Some malformed values and unexpected properties can produce unhandled
+      runtime exceptions rather than structured validation responses.
+
+    See documentation.md for additional implementation notes, scoring rules,
+    idempotency semantics, and known limitations.
 
 servers:
-  - url: https://{apiId}.execute-api.eu-west-1.amazonaws.com/Prod
-    variables:
-      apiId:
-        default: REPLACE_WITH_API_ID
-        description: API Gateway REST API ID
+  - url: "https://5a6400nk92.execute-api.eu-west-1.amazonaws.com/Prod"
+    description: Production API
 
 tags:
   - name: Transactions
@@ -31,23 +37,29 @@ paths:
       operationId: scoreTransaction
       summary: Score a transaction for fraud
       description: |
-        Evaluates the submitted transaction using fraud rules, available customer
-        history, and transaction-velocity analysis. transaction_reference is
-        the idempotency key. If a result already exists for that reference, the
-        stored result and decision are returned without reprocessing.
+        Evaluates a submitted transaction using the fraud detection pipeline,
+        available customer history, fraud rules, and transaction-velocity analysis.
 
-        The API does not currently return a duplicate indicator or compare a
-        repeated reference's payload with the original payload.
+        transaction_reference is the idempotency key.
+
+        If a result already exists for the supplied transaction_reference,
+        the previously stored result and decision are returned without
+        reprocessing the transaction.
+
+        The API does not currently return a duplicate indicator or compare
+        a repeated reference's payload with the original payload.
+
+        A repeated reference should therefore be treated as a request for
+        the existing result, not as a new transaction evaluation.
+
+        risk_level, is_fraud, and decision are separate outputs:
+        risk_level represents the fraud score classification;
+        is_fraud represents the fraud engine's fraud flag;
+        decision represents the operational decision.
+
       security:
         - BearerAuth: []
-      parameters:
-        - name: Authorization
-          in: header
-          required: true
-          description: Bearer token validated by the AWS Lambda REQUEST authorizer.
-          schema:
-            type: string
-            example: Bearer replace-with-api-token
+
       requestBody:
         required: true
         content:
@@ -69,29 +81,54 @@ paths:
               payment_method: CARD
               ip_address: 197.210.70.10
               status: APPROVED
+
       responses:
         '200':
-          description: Transaction evaluated or an existing result returned.
+          description: |
+            Transaction successfully evaluated, or an existing result
+            returned for a previously processed transaction_reference.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/TransactionScoreResponse'
-              example:
-                transaction_reference: API-TEST123456
-                risk_score: 30
-                risk_level: MEDIUM
-                is_fraud: false
-                reasons: Late Night Transaction, New Device
-                decision: APPROVE
-                decision_reason: Transaction is below the configured review threshold.
-                velocity_violation: false
+              examples:
+                approve:
+                  summary: Illustrative APPROVE response from a test fixture
+                  value:
+                    transaction_reference: API-TEST123456
+                    risk_score: 18.5
+                    risk_level: LOW
+                    is_fraud: false
+                    reasons: No suspicious activity
+                    decision: APPROVE
+                    decision_reason: Transaction is below the configured review threshold.
+                    velocity_violation: false
+
+                decline:
+                  summary: Illustrative DECLINE response from a test fixture
+                  value:
+                    transaction_reference: API-DECLINE001
+                    risk_score: 82
+                    risk_level: HIGH
+                    is_fraud: true
+                    reasons: 'New device detected, High transaction velocity'
+                    decision: DECLINE
+                    decision_reason: Risk score exceeds the automatic decline threshold.
+                    velocity_violation: true
+
         '400':
           description: |
-            Invalid JSON or a request validation failure. The response body
-            contains an error string. Some malformed values or unexpected
-            properties can raise an unhandled exception instead of returning
-            this response because the current implementation does not catch
-            every conversion/runtime error.
+            Invalid JSON or a request validation failure handled by
+            ValidationService or RequestRouter.
+
+            The response body contains an error string.
+
+            Not every invalid input is guaranteed to produce this response.
+            Some malformed values can cause uncaught TypeError or other
+            runtime exceptions during validation or model construction.
+            Unexpected request properties can also cause APITransaction
+            construction to fail.
+
           content:
             application/json:
               schema:
@@ -101,37 +138,68 @@ paths:
                   summary: Malformed JSON
                   value:
                     error: Invalid JSON body
+
                 missingField:
                   summary: Missing required field
                   value:
                     error: "Missing required field: transaction_reference"
+
                 invalidPaymentMethod:
                   summary: Unsupported payment method
                   value:
                     error: Unsupported payment_method
+
+                invalidAmount:
+                  summary: Non-positive transaction amount
+                  value:
+                    error: amount must be greater than zero
+
         '401':
           description: |
-            Possible API Gateway response when the Authorization identity
-            header is missing. Exact status and body depend on API Gateway
-            configuration; the Lambda authorizer itself returns a Deny policy.
-        '403':
-          description: |
-            Possible API Gateway response when the authorizer denies access.
-            Exact status and body depend on API Gateway configuration.
-        '429':
-          description: |
-            API Gateway may reject requests that exceed configured throttling
-            limits. The template sets a rate limit of 20 requests per second
-            and a burst limit of 40.
-        '500':
-          description: |
-            An unexpected processing failure may be surfaced by API Gateway.
-            The Lambda handler re-raises unexpected exceptions; a custom JSON
-            error response is not implemented in the shown handler.
+            Unauthorized request.
+
+            HTTP 401 was verified against the deployed endpoint when the
+            Authorization header was absent.
+
+            This observation does not establish the exact response for
+            every invalid-token or authorizer-failure scenario.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/GatewayError'
+              example:
+                message: Unauthorized
+
+        '403':
+          description: |
+            Possible API Gateway response when access is denied by the
+            authorizer or gateway configuration.
+
+            The exact status and response body depend on API Gateway
+            configuration and the authorization failure scenario.
+
+        '429':
+          description: |
+            API Gateway may reject requests that exceed configured
+            throttling limits.
+
+            The current infrastructure template specifies a rate limit
+            of 20 requests per second and a burst limit of 40.
+
+        '500':
+          description: |
+            An unexpected processing or integration failure may be surfaced
+            as a server error.
+
+            The Lambda request handler does not convert unexpected exceptions
+            into a custom JSON error response. The final HTTP status and
+            response body depend on API Gateway integration behavior.
+
+        default:
+          description: |
+            Other gateway or integration responses not explicitly described
+            above. Response status codes and bodies depend on API Gateway
+            configuration and the underlying failure.
 
 components:
   securitySchemes:
@@ -140,20 +208,35 @@ components:
       scheme: bearer
       bearerFormat: API token
       description: |
-        Send Authorization: Bearer <token>. The Lambda REQUEST authorizer
-        validates the token against a token stored in AWS Secrets Manager.
+        Send an Authorization header with the value:
+
+        Bearer <token>
+
+        The Lambda REQUEST authorizer validates the supplied token against
+        a token stored in AWS Secrets Manager.
+
         API Gateway controls the final HTTP response for rejected credentials.
 
   schemas:
     TransactionRequest:
       type: object
-      description: |
-        Transaction data accepted by the current scoring route. All listed
-        required fields are checked by ValidationService. Optional fields may
-        be omitted or set to null. Unknown properties are not explicitly
-        rejected by ValidationService, but may cause APITransaction construction
-        to fail; clients should send only the documented properties.
       additionalProperties: false
+      description: |
+        Transaction data accepted by the current scoring route.
+
+        All fields listed as required must be supplied.
+
+        Optional fields may be omitted or set to null where nullable is true.
+
+        The current ValidationService does not explicitly reject unknown
+        properties. However, APITransaction is a dataclass and unexpected
+        properties can cause model construction to fail. Clients should
+        send only the documented properties.
+
+        Some field types are described by this API contract but are not
+        independently enforced by ValidationService. In particular,
+        device_type and location are not explicitly type-checked there.
+
       required:
         - transaction_reference
         - customer_id
@@ -165,95 +248,176 @@ components:
         - location
         - ip_address
         - status
+
       properties:
         transaction_reference:
           type: string
           minLength: 1
-          description: Unique transaction reference and idempotency key.
+          pattern: '\S'
+          description: |
+            Unique transaction reference and idempotency key.
+            A previously processed reference returns its existing result.
           example: API-TEST123456
+
         customer_id:
           type: integer
-          description: Customer identifier.
+          description: |
+            Customer identifier.
+
+            The current validator checks that this value is an integer.
+            It does not enforce a positive minimum. Due to Python's integer
+            type behavior, a JSON boolean can also pass the current
+            isinstance(value, int) check.
           example: 1001
+
         amount:
           type: number
           minimum: 0
           exclusiveMinimum: true
-          description: Transaction amount, which must be greater than zero.
+          description: |
+            Transaction amount. The current validator requires a numeric
+            value greater than zero.
+
+            The implementation does not explicitly check for all
+            non-finite numeric values.
           example: 25000.00
+
         merchant_name:
           type: string
           minLength: 1
+          pattern: '\S'
           description: Merchant name.
           example: Test Merchant
+
         merchant_category:
           type: string
           minLength: 1
-          description: Merchant category. Some scoring rules use exact category comparisons.
+          pattern: '\S'
+          description: |
+            Merchant category. Some scoring rules use exact category
+            comparisons, so consistent category values are recommended.
           example: RETAIL
+
         payment_method:
           type: string
-          description: Case-insensitive input; normalized to uppercase by the application.
-          enum:
-            - CARD
-            - TRANSFER
-            - USSD
+          description: |
+            Supported values are CARD, TRANSFER, and USSD.
+
+            The application converts the supplied value to a string,
+            normalizes it to uppercase, and checks it against the
+            supported values.
           example: CARD
+
         device_type:
           type: string
-          description: Device type associated with the transaction.
+          description: |
+            Device type associated with the transaction.
+
+            Required by the request contract. The current ValidationService
+            does not independently enforce its type or non-empty value.
           example: MOBILE
+
         location:
           type: string
-          description: Transaction location.
+          description: |
+            Transaction location.
+
+            Required by the request contract. The current ValidationService
+            does not independently enforce its type or non-empty value.
           example: Lagos, Nigeria
+
         ip_address:
           type: string
-          description: IPv4 or IPv6 address.
+          description: |
+            IPv4 or IPv6 address.
+
+            The current validator passes this value to Python's IP address
+            parser. Invalid address strings produce a validation error.
+            Certain non-string values may cause an uncaught TypeError.
           example: 197.210.70.10
+
         status:
           type: string
-          description: Case-insensitive input; normalized to uppercase by the application.
-          enum:
-            - APPROVED
-            - FAILED
+          description: |
+            Supported values are APPROVED and FAILED.
+
+            The field is required by ValidationService even though the
+            APITransaction dataclass defines a default value of APPROVED.
+
+            The application converts the supplied value to a string,
+            normalizes it to uppercase, and checks it against the
+            supported values.
           example: APPROVED
+
         transaction_time:
           type: string
           nullable: true
           format: date-time
           description: |
-            Optional ISO 8601 timestamp. Offset-aware values are normalized
-            to UTC; offset-free values are interpreted as UTC. If omitted or
-            null, the current UTC time is used.
+            Optional transaction timestamp.
+
+            The application parses this value using Python's
+            datetime.fromisoformat().
+
+            Offset-aware timestamps are converted to UTC.
+            Offset-free timestamps are interpreted as UTC.
+
+            If omitted or null, the current UTC time is used.
+
+            An empty string is not treated as omitted and fails timestamp
+            parsing.
+
+            Clients should use an ISO 8601/RFC 3339 date-time representation.
           example: '2026-08-27T18:30:00+01:00'
+
         currency:
           type: string
           nullable: true
           minLength: 1
+          pattern: '\S'
           description: |
-            Optional non-empty currency label. Currently not transferred to
-            the internal Transaction model and not used by the scoring pipeline.
+            Optional non-empty currency label.
+
+            Accepted by APITransaction but not transferred to the internal
+            Transaction model or used by the current scoring pipeline.
           example: NGN
+
         merchant_id:
           type: string
           nullable: true
           minLength: 1
+          pattern: '\S'
           description: |
-            Optional non-empty merchant identifier. Currently not transferred
-            to the internal Transaction model.
+            Optional non-empty merchant identifier.
+
+            Accepted by APITransaction but not transferred to the internal
+            Transaction model.
           example: MERCHANT-001
+
         device_id:
           type: string
           nullable: true
           minLength: 1
+          pattern: '\S'
           description: |
-            Optional non-empty device identifier. Currently not transferred
-            to the internal Transaction model.
+            Optional non-empty device identifier.
+
+            Accepted by APITransaction but not transferred to the internal
+            Transaction model.
           example: DEVICE-001
 
     TransactionScoreResponse:
       type: object
+      description: |
+        Result returned after transaction scoring or retrieval of an
+        existing result.
+
+        risk_level is the fraud risk classification.
+        is_fraud is the fraud engine's fraud flag.
+        decision is the operational outcome from the decision engine.
+
+        These fields represent different aspects of the evaluation and
+        should not be treated as interchangeable.
       required:
         - transaction_reference
         - risk_score
@@ -263,46 +427,64 @@ components:
         - decision
         - decision_reason
         - velocity_violation
+
       properties:
         transaction_reference:
           type: string
           description: Reference associated with the stored or newly evaluated result.
           example: API-TEST123456
+
         risk_score:
           type: number
           description: Additive fraud risk score calculated by the fraud engine.
           example: 30
+
         risk_level:
           type: string
           enum:
             - LOW
             - MEDIUM
             - HIGH
-          description: LOW below 30; MEDIUM from 30 to 59; HIGH at 60 or above.
+          description: |
+            Fraud risk classification.
+
+            LOW: below 30.
+            MEDIUM: 30 to below 60.
+            HIGH: 60 or above.
           example: MEDIUM
+
         is_fraud:
           type: boolean
-          description: True when the fraud engine score is at least 50.
+          description: |
+            True when the fraud engine score is at least 50.
           example: false
+
         reasons:
           type: string
-          description: Comma-separated scoring reasons, or No suspicious activity.
+          description: |
+            Comma-separated scoring reasons, or
+            "No suspicious activity" when no scoring reasons are present.
           example: Late Night Transaction, New Device
+
         decision:
           type: string
           enum:
             - APPROVE
             - REVIEW
             - DECLINE
-          description: Operational decision from the decision engine.
+          description: |
+            Operational decision returned by the decision engine.
           example: APPROVE
+
         decision_reason:
           type: string
           description: Explanation for the operational decision.
           example: Transaction is below the configured review threshold.
+
         velocity_violation:
           type: boolean
-          description: Whether the velocity engine detected a threshold violation.
+          description: |
+            Indicates whether the velocity engine detected a threshold violation.
           example: false
 
     ValidationError:
@@ -318,9 +500,12 @@ components:
     GatewayError:
       type: object
       description: |
-        Illustrative gateway error schema only. The current Lambda handler
-        does not guarantee this body for unhandled exceptions.
+        Generic gateway error shape.
+
+        Actual response bodies depend on API Gateway response configuration
+        and may differ between authentication failures and unexpected
+        processing or integration failures.
       properties:
         message:
           type: string
-          example: Internal server error
+          example: Unauthorized
